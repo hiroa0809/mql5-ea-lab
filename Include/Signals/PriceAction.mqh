@@ -37,7 +37,6 @@ struct SPriceActionParams
    double            pin_opposite_ratio;  // 反対ヒゲ / 全レンジ の上限
    //--- 包み足 / はらみ足
    bool              require_color_flip;  // 色の反転を必須とするか
-   double            min_prev_body_atr;   // 前足実体の下限（ATR 比）
    //--- 共通
    double            min_range_atr;       // 全レンジの下限（ATR 比）
    bool              require_day_extreme; // 当日高安の更新を必須とするか
@@ -47,7 +46,6 @@ struct SPriceActionParams
       pin_wick_ratio      = 0.66;
       pin_opposite_ratio  = 0.15;
       require_color_flip  = true;
-      min_prev_body_atr   = 0.10;
       min_range_atr       = 0.50;
       require_day_extreme = true;
      }
@@ -221,90 +219,95 @@ ENUM_SIGNAL_DIR CPriceAction::DetectPinBar(const int shift, const double atr)
   }
 
 //+------------------------------------------------------------------+
-//| 包み足判定（実体基準）                                           |
+//| 包み足判定（アウトサイドバー）                                   |
 //|                                                                  |
-//| 陰 → 陽 で前足の実体を包む → 買い                                |
-//| 陽 → 陰 で前足の実体を包む → 売り                                |
+//| 定義（2条件とも必須・固定仕様）:                                 |
+//|  ① 一本目の高値と安値を、二本目の高値と安値が完全に包む         |
+//|  ② 一本目の高値(安値)を、二本目の終値が完全に超えて終えている   |
+//|                                                                  |
+//| 実体ではなく**全レンジ（ヒゲ含む）**で判定する。                 |
+//| ② を課すのは、前足の値動きを完全に否定して終えた形だけを拾う     |
+//| ため。② が無いとヒゲでは包んだが終値は前足レンジ内、という      |
+//| 中途半端な足も混入する。                                         |
+//|                                                                  |
+//| 陰 → 陽 で包む → 買い / 陽 → 陰 で包む → 売り                    |
 //+------------------------------------------------------------------+
 ENUM_SIGNAL_DIR CPriceAction::DetectEngulfing(const int shift, const double atr)
   {
+   double h1 = iHigh(m_symbol,  m_tf, shift + 1);
+   double l1 = iLow(m_symbol,   m_tf, shift + 1);
    double o1 = iOpen(m_symbol,  m_tf, shift + 1);
    double c1 = iClose(m_symbol, m_tf, shift + 1);
+
+   double h0 = iHigh(m_symbol,  m_tf, shift);
+   double l0 = iLow(m_symbol,   m_tf, shift);
    double o0 = iOpen(m_symbol,  m_tf, shift);
    double c0 = iClose(m_symbol, m_tf, shift);
 
-   double range = iHigh(m_symbol, m_tf, shift) - iLow(m_symbol, m_tf, shift);
+   double range = h0 - l0;
    if(range <= 0.0 || range < atr * m_params.min_range_atr)
       return(SIGNAL_NONE);
 
-   //--- 前足の実体が極小なら包んでも意味が薄い
-   double prev_body = MathAbs(c1 - o1);
-   if(prev_body < atr * m_params.min_prev_body_atr)
-      return(SIGNAL_NONE);
-
-   double prev_hi = MathMax(o1, c1);
-   double prev_lo = MathMin(o1, c1);
-   double curr_hi = MathMax(o0, c0);
-   double curr_lo = MathMin(o0, c0);
-
-   //--- 前足の実体を完全に包含していること
-   if(!(curr_hi >= prev_hi && curr_lo <= prev_lo))
+   //--- ① 一本目の高値・安値を完全に包んでいること（ヒゲ含む）
+   //    同値は「超えた」と見なさないため等号を含めない
+   if(!(h0 > h1 && l0 < l1))
       return(SIGNAL_NONE);
 
    bool prev_bear = (c1 < o1);
    bool curr_bull = (c0 > o0);
+   bool curr_bear = (c0 < o0);
 
-   //--- 陰 → 陽（買い）
-   if(curr_bull && (!m_params.require_color_flip || prev_bear))
+   //--- 陰 → 陽（買い）: ② 終値が一本目の高値を超えて終えていること
+   if(curr_bull && (!m_params.require_color_flip || prev_bear) && c0 > h1)
       return(SIGNAL_LONG);
 
-   //--- 陽 → 陰（売り）
-   if(!curr_bull && c0 < o0 && (!m_params.require_color_flip || !prev_bear))
+   //--- 陽 → 陰（売り）: ② 終値が一本目の安値を割って終えていること
+   if(curr_bear && (!m_params.require_color_flip || !prev_bear) && c0 < l1)
       return(SIGNAL_SHORT);
 
    return(SIGNAL_NONE);
   }
 
 //+------------------------------------------------------------------+
-//| はらみ足判定（実体基準）                                         |
+//| はらみ足判定（インサイドバー）                                   |
 //|                                                                  |
-//| 前足の実体内に収まる。陰 → 陽 で買い / 陽 → 陰 で売り。          |
-//| ボラティリティ縮小の示唆であり、包み足とは逆の形。               |
+//| 包み足の逆。一本目の高値と安値の内側に、二本目の高値と安値が     |
+//| 完全に収まる。包み足と基準を揃え**全レンジ（ヒゲ含む）**で判定。 |
+//|                                                                  |
+//| 陰 → 陽 で買い / 陽 → 陰 で売り。                                |
 //+------------------------------------------------------------------+
 ENUM_SIGNAL_DIR CPriceAction::DetectHarami(const int shift, const double atr)
   {
+   double h1 = iHigh(m_symbol,  m_tf, shift + 1);
+   double l1 = iLow(m_symbol,   m_tf, shift + 1);
    double o1 = iOpen(m_symbol,  m_tf, shift + 1);
    double c1 = iClose(m_symbol, m_tf, shift + 1);
+
+   double h0 = iHigh(m_symbol,  m_tf, shift);
+   double l0 = iLow(m_symbol,   m_tf, shift);
    double o0 = iOpen(m_symbol,  m_tf, shift);
    double c0 = iClose(m_symbol, m_tf, shift);
 
-   //--- はらみは前足が大きいことが条件。前足レンジで下限を見る
-   double prev_range = iHigh(m_symbol, m_tf, shift + 1) - iLow(m_symbol, m_tf, shift + 1);
+   //--- はらみは一本目が大きいことが前提。下限は一本目のレンジで見る
+   double prev_range = h1 - l1;
    if(prev_range <= 0.0 || prev_range < atr * m_params.min_range_atr)
       return(SIGNAL_NONE);
 
-   double prev_body = MathAbs(c1 - o1);
-   if(prev_body < atr * m_params.min_prev_body_atr)
-      return(SIGNAL_NONE);
-
-   double prev_hi = MathMax(o1, c1);
-   double prev_lo = MathMin(o1, c1);
-   double curr_hi = MathMax(o0, c0);
-   double curr_lo = MathMin(o0, c0);
-
-   //--- 前足の実体内に収まっていること
-   if(!(curr_hi <= prev_hi && curr_lo >= prev_lo))
+   //--- 一本目の高値・安値の内側に完全に収まっていること（ヒゲ含む）
+   //    同値は「収まった」と見なさないため等号を含めない
+   if(!(h0 < h1 && l0 > l1))
       return(SIGNAL_NONE);
 
    bool prev_bear = (c1 < o1);
    bool curr_bull = (c0 > o0);
+   bool curr_bear = (c0 < o0);
 
    //--- 陰 → 陽（買い）
    if(curr_bull && (!m_params.require_color_flip || prev_bear))
       return(SIGNAL_LONG);
 
    //--- 陽 → 陰（売り）
-   if(!curr_bull && c0 < o0 && (!m_params.require_color_flip || !prev_bear))
+   if(curr_bear && (!m_params.require_color_flip || !prev_bear))
       return(SIGNAL_SHORT);
 
    return(SIGNAL_NONE);

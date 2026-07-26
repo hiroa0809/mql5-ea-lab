@@ -38,7 +38,6 @@ input double InpPinOppositeRatio           = 0.15;  // ピンバー: 反対ヒ�
 
 //--- 包み足 / はらみ足
 input bool   InpRequireColorFlip           = true;  // 包み/はらみ: 色の反転を必須
-input double InpMinPrevBodyATR             = 0.10;  // 包み/はらみ: 前足実体の下限(ATR比)
 
 //--- 共通
 input double InpMinRangeATR                = 0.50;  // 共通: レンジの下限(ATR比)
@@ -83,7 +82,6 @@ int OnInit(void)
    params.pin_wick_ratio      = InpPinWickRatio;
    params.pin_opposite_ratio  = InpPinOppositeRatio;
    params.require_color_flip  = InpRequireColorFlip;
-   params.min_prev_body_atr   = InpMinPrevBodyATR;
    params.min_range_atr       = InpMinRangeATR;
    params.require_day_extreme = InpRequireDayExtreme;
    g_pa.SetParams(params);
