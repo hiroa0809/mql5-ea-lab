@@ -2,16 +2,9 @@
 
 ## Git運用ルール
 
-- **PR運用**: **コード実装を含む変更**は featureブランチ→Pull Request経由でmainへ統合する。mainへの直接pushは避ける。
-- **PR不要の例外（ドキュメント・設定のみの変更）**: 下記に**該当し、かつコード実装を含まない**変更は、featureブランチを切った上で **main へ直接 ff マージしてよい**（PR・CodeRabbitレビューは不要）。
-  - `docs/` 配下のドキュメント
-  - `tasks/TASK_MASTER.md` などのタスク管理ファイル
-  - `.claude/` 配下（CLAUDE.md・スキル定義・設定）
-  - `.gitignore` 等のリポジトリ設定
-  - 理由: CodeRabbit のレビュー価値が薄い一方、無料プランのレビュー回数を消費するため。**コード（`.mq5` / `.mqh`）が1ファイルでも含まれる場合は通常どおり PR を作る**。
-  - 手順: ブランチを切る → コミット → `git switch main` → `git merge --ff-only <branch>` → `git push`。force push はしない。取り消しは `git revert`。
-- **CodeRabbitレビュー**: PR作成時にCodeRabbitの無料レビューを利用する。
-- 上記により `fin` スキルのステップ3.5（trunk自動追従）はスキップ対象。mainの更新はPRマージまたは上記の例外マージ経由で行う。
+- **`.mq5` / `.mqh` を含む変更**: featureブランチ → PR → CodeRabbitレビュー → マージ。main への直接 push はしない。
+- **それ以外（`docs/` `tasks/` `.claude/` `.gitignore` 等）**: main で直接作業してよい（PR不要）。コミット前に `git status` で `.mq5`/`.mqh` の混入がないか確認する。混入していたらブランチへ退避（`git switch -c` は未コミット変更を持ち越す）。
+- 手順の詳細は `/commit-pr`（PR作成）、`/fin`（セッションクローズ・ブランチ統合）が持つ。
 
 ### CodeRabbit の MQL5 対応（2026-07-26 PR #1 で検証済み）
 
