@@ -36,24 +36,22 @@ allowed-tools: Read, Write, Glob, Grep, Bash, Edit
    - リモート（origin = hiroa0809/mql5-ea-lab）にプッシュする。デフォルトブランチ（main）上で作業していた場合は、先にブランチを切るかユーザーに確認する。
 4. 変更がない場合: 「未コミットの変更はありません」と報告する。
 
-## ステップ 3.5: main を trunk として最新化（PR不要の個人開発プロジェクトのみ）
+## ステップ 3.5: ブランチを main へ統合するか判断（毎回・スキップ禁止）
 
-**適用条件の判定（順に確認。1つでも外れたら本ステップはスキップし、その理由を報告してステップ 4 へ）**:
+**目的**: ブランチを main に戻さず次の枝を切り続けると、未統合の枝が溜まり、いつか main から切って**先祖返り**する。区切りごとに必ず判断する。
 
-1. **PR運用プロジェクトは対象外**: `.claude/CLAUDE.md` 等でPR運用を定めている場合はスキップ。PR不要（純粋な個人開発）の場合のみ続行。判断が付かない場合はユーザーに確認。
-2. **現在ブランチが main（デフォルトブランチ）なら不要**: 既に main 上ならスキップ。
-3. 作業ツリーがクリーン（ステップ 3 でコミット済み）かつ現在ブランチが push 済みであること。
+現在ブランチが main、または push 未完了ならスキップ。それ以外は:
 
-**手順（`git -C d:/repository/mql5-ea-lab` を使う。`&&` チェーンしない）**:
+1. **目的を達成したかユーザーに聞く**（自動判断しない）。判断材料に `git -C d:/repository/mql5-ea-lab log main..<branch> --oneline` を示す。
+   - **作業途中** → 統合せず終了。報告に「未統合のまま継続」と明記し、次セッションが同じブランチに戻れるよう TASK_MASTER に一行残す。
+2. **達成なら統合**。経路は `.claude/CLAUDE.md`「Git運用ルール」に従う:
+   - **コード（`.mq5`/`.mqh`）を含む** → PR 作成のみ（`gh pr create`）。レビュー後マージのため**本スキルではマージしない**。PR URL を報告。
+   - **ドキュメント・設定のみ** → main へ直接 ff マージ:
+     `merge-base --is-ancestor main <branch>` で ff 可能を確認 → `switch main` → `merge --ff-only <branch>` → `push`。
+     ff 不可（分岐）なら**自動解決せずユーザーに報告**。
 
-1. 現在ブランチ名を控える: `git -C d:/repository/mql5-ea-lab branch --show-current`
-2. **main が現在ブランチの祖先か確認**: `git -C d:/repository/mql5-ea-lab merge-base --is-ancestor main <branch>`（exit 0 = fast-forward 可能）
-   - **ff 可能な場合**: `checkout main` → `merge --ff-only <branch>` → `push` → `checkout <branch>`（元のブランチに戻る）。
-   - **ff 不可の場合**（分岐がある）: **自動でマージ/リベースせず、その事実をユーザーに報告して判断を仰ぐ**。
-3. フィーチャーブランチは**残す**（revert の参照点になる）。
-4. マージ結果をステップ 4 の報告に含める。
-
-**注意**: main への push は通常の ff push（履歴書き換えなし）。force push はしない。取り消しは `git revert` で行う。
+ブランチは残す（revert の参照点）。force push はしない。取り消しは `git revert`。
+統合後の次作業は main から切る。未統合なら次セッションはそのブランチの続きから。
 
 ## ステップ 4: 完了報告
 
