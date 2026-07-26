@@ -19,13 +19,13 @@
 #property indicator_label1  "PA Long"
 #property indicator_type1   DRAW_ARROW
 #property indicator_color1  clrDodgerBlue
-#property indicator_width1  2
+#property indicator_width1  3
 
 //--- 売りシグナル
 #property indicator_label2  "PA Short"
 #property indicator_type2   DRAW_ARROW
 #property indicator_color2  clrOrangeRed
-#property indicator_width2  2
+#property indicator_width2  3
 
 #include <Signals\PriceAction.mqh>
 

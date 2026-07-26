@@ -53,6 +53,10 @@ input double InpLots                  = 0.01;  // ロット数
 input ulong  InpMagic                 = 20260727; // マジックナンバー
 input ulong  InpSlippage              = 10;    // 許容スリッページ(points)
 
+//--- 可視化（ビジュアルモード確認用。本番テストでは OFF 推奨）
+input bool   InpDrawSignals           = false; // シグナルをチャートに描画する
+input int    InpArrowWidth            = 3;     // 矢印のサイズ
+
 //--- グローバル
 CTrade        g_trade;
 CPriceAction *g_pa = NULL;
@@ -139,6 +143,10 @@ void OnDeinit(const int reason)
       delete g_pa;
       g_pa = NULL;
      }
+
+   //--- 描画したオブジェクトを残さない（再実行時に前回分と混ざるため）
+   if(InpDrawSignals)
+      ObjectsDeleteAll(0, "PA_");
   }
 
 //+------------------------------------------------------------------+
@@ -190,7 +198,11 @@ void OnTick(void)
      {
       g_pending.bars_left--;
       if(g_pending.bars_left <= 0)
+        {
+         //--- 期限切れ（灰色の × 印）
+         DrawCancel(g_pending.trigger, false);
          ClearPending();
+        }
       return;
      }
 
@@ -199,8 +211,11 @@ void OnTick(void)
    if(dir == SIGNAL_NONE)
       return;
 
-   double pat_high = iHigh(_Symbol, (ENUM_TIMEFRAMES)_Period, 1);
-   double pat_low  = iLow(_Symbol,  (ENUM_TIMEFRAMES)_Period, 1);
+   double   pat_high = iHigh(_Symbol, (ENUM_TIMEFRAMES)_Period, 1);
+   double   pat_low  = iLow(_Symbol,  (ENUM_TIMEFRAMES)_Period, 1);
+   datetime pat_time = iTime(_Symbol, (ENUM_TIMEFRAMES)_Period, 1);
+
+   DrawSignal(pat_time, dir, pat_high, pat_low);
 
    if(!InpUseStopEntry)
      {
@@ -216,6 +231,8 @@ void OnTick(void)
    g_pending.trigger   = (dir == SIGNAL_LONG) ? pat_high : pat_low;
    g_pending.invalid   = (dir == SIGNAL_LONG) ? pat_low  : pat_high;
    g_pending.bars_left = InpStopEntryValidBars;
+
+   DrawTrigger(pat_time, g_pending.trigger);
   }
 
 //+------------------------------------------------------------------+
@@ -242,9 +259,10 @@ void ProcessPending(void)
 
    if(g_pending.dir == SIGNAL_LONG)
      {
-      //--- 安値を割ったらキャンセル
+      //--- 安値を割ったらキャンセル（赤い × 印）
       if(bid <= g_pending.invalid)
         {
+         DrawCancel(g_pending.invalid, true);
          ClearPending();
          return;
         }
@@ -260,9 +278,10 @@ void ProcessPending(void)
 
    if(g_pending.dir == SIGNAL_SHORT)
      {
-      //--- 高値を上抜けたらキャンセル
+      //--- 高値を上抜けたらキャンセル（赤い × 印）
       if(ask >= g_pending.invalid)
         {
+         DrawCancel(g_pending.invalid, true);
          ClearPending();
          return;
         }
@@ -325,6 +344,90 @@ double NormalizeStopLevel(const ENUM_SIGNAL_DIR dir, const double sl)
       adjusted = ask + min_d;
 
    return(NormalizeDouble(adjusted, digits));
+  }
+
+//+------------------------------------------------------------------+
+//| シグナル検出を矢印で描画する                                     |
+//|                                                                  |
+//| ビジュアルモードで挙動を目視確認するためのもの。オブジェクトを   |
+//| 大量に生成するとテストが遅くなるため既定では無効。               |
+//+------------------------------------------------------------------+
+void DrawSignal(const datetime bar_time, const ENUM_SIGNAL_DIR dir,
+                const double pat_high, const double pat_low)
+  {
+   if(!InpDrawSignals)
+      return;
+
+   string name = StringFormat("PA_sig_%I64d", (long)bar_time);
+   double price;
+   int    code;
+   color  clr;
+
+   if(dir == SIGNAL_LONG)
+     {
+      price = pat_low;
+      code  = 233;            // 上向き矢印
+      clr   = clrDodgerBlue;
+     }
+   else
+     {
+      price = pat_high;
+      code  = 234;            // 下向き矢印
+      clr   = clrOrangeRed;
+     }
+
+   if(!ObjectCreate(0, name, OBJ_ARROW, 0, bar_time, price))
+      return;
+
+   ObjectSetInteger(0, name, OBJPROP_ARROWCODE, code);
+   ObjectSetInteger(0, name, OBJPROP_COLOR, clr);
+   ObjectSetInteger(0, name, OBJPROP_WIDTH, InpArrowWidth);
+   ObjectSetInteger(0, name, OBJPROP_ANCHOR,
+                    (dir == SIGNAL_LONG) ? ANCHOR_TOP : ANCHOR_BOTTOM);
+   ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
+  }
+
+//+------------------------------------------------------------------+
+//| 逆指値のトリガー価格を点線で描画する                             |
+//+------------------------------------------------------------------+
+void DrawTrigger(const datetime bar_time, const double trigger)
+  {
+   if(!InpDrawSignals)
+      return;
+
+   string   name = StringFormat("PA_trg_%I64d", (long)bar_time);
+   datetime to   = bar_time + PeriodSeconds((ENUM_TIMEFRAMES)_Period)
+                   * (InpStopEntryValidBars + 1);
+
+   if(!ObjectCreate(0, name, OBJ_TREND, 0, bar_time, trigger, to, trigger))
+      return;
+
+   ObjectSetInteger(0, name, OBJPROP_COLOR, clrSilver);
+   ObjectSetInteger(0, name, OBJPROP_STYLE, STYLE_DOT);
+   ObjectSetInteger(0, name, OBJPROP_RAY_RIGHT, false);
+   ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
+  }
+
+//+------------------------------------------------------------------+
+//| 逆指値がキャンセルされたことを × 印で描画する                    |
+//|                                                                  |
+//| 逆側を先に更新した場合と期限切れの場合を色で分ける。             |
+//+------------------------------------------------------------------+
+void DrawCancel(const double price, const bool invalidated)
+  {
+   if(!InpDrawSignals)
+      return;
+
+   datetime now  = TimeCurrent();
+   string   name = StringFormat("PA_cxl_%I64d", (long)now);
+
+   if(!ObjectCreate(0, name, OBJ_ARROW, 0, now, price))
+      return;
+
+   ObjectSetInteger(0, name, OBJPROP_ARROWCODE, 251); // ×
+   ObjectSetInteger(0, name, OBJPROP_COLOR, invalidated ? clrRed : clrGray);
+   ObjectSetInteger(0, name, OBJPROP_WIDTH, InpArrowWidth);
+   ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
   }
 
 //+------------------------------------------------------------------+
