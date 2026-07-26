@@ -275,6 +275,10 @@ ENUM_SIGNAL_DIR CPriceAction::DetectEngulfing(const int shift, const double atr)
 //| 完全に収まる。包み足と基準を揃え**全レンジ（ヒゲ含む）**で判定。 |
 //|                                                                  |
 //| 陰 → 陽 で買い / 陽 → 陰 で売り。                                |
+//|                                                                  |
+//| 当日高安フィルタの対象足は Detect() 側で一本目に振り替える。     |
+//| 二本目は一本目の内側に収まるため、二本目で高安を判定すると       |
+//| 原理的に成立せず常にゼロ件になる。                               |
 //+------------------------------------------------------------------+
 ENUM_SIGNAL_DIR CPriceAction::DetectHarami(const int shift, const double atr)
   {
@@ -333,6 +337,9 @@ ENUM_SIGNAL_DIR CPriceAction::Detect(const ENUM_PA_PATTERN pattern, const int sh
 
    ENUM_SIGNAL_DIR dir = SIGNAL_NONE;
 
+   //--- 当日高安を判定する対象足。既定はパターンを形成した足自身
+   int extreme_shift = shift;
+
    switch(pattern)
      {
       case PA_PINBAR:
@@ -343,6 +350,10 @@ ENUM_SIGNAL_DIR CPriceAction::Detect(const ENUM_PA_PATTERN pattern, const int sh
          break;
       case PA_HARAMI:
          dir = DetectHarami(shift, atr);
+         //--- はらみ足は定義上、二本目が一本目の内側に収まる。
+         //    二本目が当日高安を更新することは原理的にありえないため、
+         //    高安の判定は一本目（大きい方の足）を対象とする。
+         extreme_shift = shift + 1;
          break;
       default:
          return(SIGNAL_NONE);
@@ -352,7 +363,7 @@ ENUM_SIGNAL_DIR CPriceAction::Detect(const ENUM_PA_PATTERN pattern, const int sh
       return(SIGNAL_NONE);
 
    //--- 当日高安の更新を必須とする場合はここで絞る
-   if(m_params.require_day_extreme && !IsDayExtreme(shift, dir))
+   if(m_params.require_day_extreme && !IsDayExtreme(extreme_shift, dir))
       return(SIGNAL_NONE);
 
    return(dir);
