@@ -1,0 +1,17 @@
+# MQL5 コンパイル済みバイナリ
+*.ex5
+*.ex4
+
+# ログ
+*.log
+
+# MetaTrader 生成物
+Tester/
+Files/
+*.opt
+*.set.bak
+
+# OS
+Thumbs.db
+Desktop.ini
+.DS_Store
