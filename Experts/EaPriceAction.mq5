@@ -183,9 +183,19 @@ void OnTick(void)
       g_pos_bars_held++;
       if(g_pos_bars_held >= InpHoldBars)
         {
-         ReportTradeResult("PositionClose", g_trade.PositionClose(g_pos_ticket));
-         g_pos_ticket    = 0;
-         g_pos_bars_held = 0;
+         //--- PositionClose() の戻り値は要求送信可否のみ。約定可否は
+         //    ResultRetcode() で判別する。失敗時に状態をリセットすると
+         //    決済が残ったままカウントが途切れ、次の判定まで
+         //    InpHoldBars 本ぶん遅れるため、成功時のみリセットする。
+         bool sent = g_trade.PositionClose(g_pos_ticket);
+         ReportTradeResult("PositionClose", sent);
+
+         uint retcode = g_trade.ResultRetcode();
+         if(sent && (retcode == TRADE_RETCODE_DONE || retcode == TRADE_RETCODE_PLACED))
+           {
+            g_pos_ticket    = 0;
+            g_pos_bars_held = 0;
+           }
         }
       return;
      }

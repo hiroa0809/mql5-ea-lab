@@ -163,7 +163,10 @@ bool CPriceAction::IsDayExtreme(const int shift, const ENUM_SIGNAL_DIR dir)
       return(false);
 
    int count = start_shift - shift + 1;
-   if(count <= 0)
+
+   //--- 当日最初の足は比較対象が自分しかなく、iLowest/iHighest が
+   //    必ず自分を返すためフィルタが無効化される。除外する。
+   if(count <= 1)
       return(false);
 
    //--- 対象足自身が当日レンジの端を作っていること
