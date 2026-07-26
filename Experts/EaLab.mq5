@@ -82,21 +82,49 @@ void OnTick(void)
       return;
 
    //--- 保有中なら決済判定を優先
-   ENUM_SIGNAL_DIR pos_dir = CurrentPositionDir();
+   ulong pos_ticket = 0;
+   ENUM_SIGNAL_DIR pos_dir = CurrentPositionDir(pos_ticket);
    if(pos_dir != SIGNAL_NONE)
      {
       if(g_signal.ShouldExit(pos_dir))
-         g_trade.PositionClose(_Symbol);
+        {
+         //--- ヘッジ口座で他ポジションを巻き込まないよう ticket 指定で決済
+         bool sent = g_trade.PositionClose(pos_ticket);
+         ReportTradeResult("PositionClose", sent);
+        }
       return;
      }
 
    //--- ノーポジションならエントリー判定
    ENUM_SIGNAL_DIR entry = g_signal.Entry();
    if(entry == SIGNAL_LONG)
-      g_trade.Buy(InpLots, _Symbol);
+      ReportTradeResult("Buy", g_trade.Buy(InpLots, _Symbol));
    else
       if(entry == SIGNAL_SHORT)
-         g_trade.Sell(InpLots, _Symbol);
+         ReportTradeResult("Sell", g_trade.Sell(InpLots, _Symbol));
+  }
+
+//+------------------------------------------------------------------+
+//| 取引要求の結果を記録する                                         |
+//|                                                                  |
+//| CTrade の戻り値は「要求をサーバーへ送れたか」しか示さない。      |
+//| 実際の約定可否は ResultRetcode() で判別する必要がある。          |
+//| 失敗しても再試行はしない（次の確定足で再判定される）。          |
+//+------------------------------------------------------------------+
+void ReportTradeResult(const string action, const bool sent)
+  {
+   uint retcode = g_trade.ResultRetcode();
+
+   if(!sent)
+     {
+      PrintFormat("EaLab: %s の要求送信に失敗 (retcode=%u, %s, error=%d)",
+                  action, retcode, g_trade.ResultRetcodeDescription(), GetLastError());
+      return;
+     }
+
+   if(retcode != TRADE_RETCODE_DONE && retcode != TRADE_RETCODE_PLACED)
+      PrintFormat("EaLab: %s が約定しませんでした (retcode=%u, %s)",
+                  action, retcode, g_trade.ResultRetcodeDescription());
   }
 
 //+------------------------------------------------------------------+
@@ -114,13 +142,18 @@ bool IsNewBar(void)
 
 //+------------------------------------------------------------------+
 //| 自 EA が保有中のポジション方向を返す                             |
+//|                                                                  |
+//| ticket は out 引数で返す。ヘッジ口座では同一シンボルに複数        |
+//| ポジションが並びうるため、決済は必ず ticket 指定で行う。         |
 //+------------------------------------------------------------------+
-ENUM_SIGNAL_DIR CurrentPositionDir(void)
+ENUM_SIGNAL_DIR CurrentPositionDir(ulong &ticket)
   {
+   ticket = 0;
+
    for(int i = PositionsTotal() - 1; i >= 0; i--)
      {
-      ulong ticket = PositionGetTicket(i);
-      if(ticket == 0)
+      ulong t = PositionGetTicket(i);
+      if(t == 0)
          continue;
 
       if(PositionGetString(POSITION_SYMBOL) != _Symbol)
@@ -131,9 +164,15 @@ ENUM_SIGNAL_DIR CurrentPositionDir(void)
 
       long type = PositionGetInteger(POSITION_TYPE);
       if(type == POSITION_TYPE_BUY)
+        {
+         ticket = t;
          return(SIGNAL_LONG);
+        }
       if(type == POSITION_TYPE_SELL)
+        {
+         ticket = t;
          return(SIGNAL_SHORT);
+        }
      }
 
    return(SIGNAL_NONE);
