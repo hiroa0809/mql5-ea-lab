@@ -40,8 +40,9 @@ MT5 同梱の MetaEditor を CLI で呼ぶ。VSCode 拡張は不要。**使用�
 
 ```
 %APPDATA%\MetaQuotes\Terminal\C4171FD2B38378D6406D5C84412B5F20\MQL5\   ← XM のデータフォルダ
-  Include\Signals      → d:\repository\mql5-ea-lab\Include\Signals
-  Experts\mql5-ea-lab  → d:\repository\mql5-ea-lab\Experts
+  Include\Signals         → d:\repository\mql5-ea-lab\Include\Signals
+  Experts\mql5-ea-lab     → d:\repository\mql5-ea-lab\Experts
+  Indicators\mql5-ea-lab  → d:\repository\mql5-ea-lab\Indicators
 ```
 
 - コンパイルは**ジャンクション側のパス**を指定する（リポジトリの生パスを直接指定すると標準ライブラリか自作ライブラリのどちらかが解決できない）。
@@ -51,6 +52,7 @@ MT5 同梱の MetaEditor を CLI で呼ぶ。VSCode 拡張は不要。**使用�
   $mq = "$env:APPDATA\MetaQuotes\Terminal\C4171FD2B38378D6406D5C84412B5F20\MQL5"
   New-Item -ItemType Junction -Path "$mq\Include\Signals" -Target "d:\repository\mql5-ea-lab\Include\Signals"
   New-Item -ItemType Junction -Path "$mq\Experts\mql5-ea-lab" -Target "d:\repository\mql5-ea-lab\Experts"
+  New-Item -ItemType Junction -Path "$mq\Indicators\mql5-ea-lab" -Target "d:\repository\mql5-ea-lab\Indicators"
   ```
 
 ### 他ブローカーの MetaEditor（参考）
