@@ -379,6 +379,19 @@ void OpenMarket(const ENUM_SIGNAL_DIR dir, const double pat_high, const double p
      {
       double risk = MathAbs(entry - sl) * InpTPRatio;
       tp = (dir == SIGNAL_LONG) ? entry + risk : entry - risk;
+
+      //--- ストップレベルは SL だけでなく TP にも適用される。InpTPRatio が
+      //    小さいと最小距離を下回り、発注が Invalid stops で拒否されるため
+      //    最小距離まで押し戻す。NormalizeStopLevel は bid/ask との比較方向が
+      //    SL 前提のため流用できず、ここで TP 用に距離を確保する。
+      double min_d = (double)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) * point;
+
+      if(dir == SIGNAL_LONG && tp - entry < min_d)
+         tp = entry + min_d;
+
+      if(dir == SIGNAL_SHORT && entry - tp < min_d)
+         tp = entry - min_d;
+
       tp = NormalizeDouble(tp, digits);
      }
 
