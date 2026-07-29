@@ -107,6 +107,15 @@ int OnInit(void)
       return(INIT_PARAMETERS_INCORRECT);
      }
 
+   //--- 負数だと買いの損切りがパターン足の安値より上、売りは高値より下へ
+   //    移動し、「損切りはパターン足の逆側」という前提が壊れる。
+   //    NormalizeStopLevel は最小ストップ距離しか見ないため回復しない。
+   if(InpSLBufferPips < 0.0)
+     {
+      Print("EaPriceAction: InpSLBufferPips は 0 以上を指定してください");
+      return(INIT_PARAMETERS_INCORRECT);
+     }
+
    //--- 両方 OFF だと決済手段が損切りだけになり、利益方向へ動いた
    //    ポジションが無期限に残る。設定ミスの可能性が高いため警告する。
    if(!InpUseHoldBars && !InpUseTakeProfit)
