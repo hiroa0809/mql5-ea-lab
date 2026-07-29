@@ -46,7 +46,11 @@ input bool   InpUseStopEntry          = true;  // 逆指値エントリーを使
 input int    InpStopEntryValidBars    = 3;     // 逆指値の有効本数(N本以内に約定しなければ取消)
 
 //--- エグジット
+input bool   InpUseHoldBars           = true;  // N本経過でクローズする
 input int    InpHoldBars              = 10;    // N本経過後にクローズ
+input bool   InpUseTakeProfit         = false; // 利確を使う(損切り幅のN倍)
+input double InpTPRatio               = 1.0;   // 利確 = 損切り幅 × N (1.0=勝率50%で±0)
+input double InpSLBufferPips          = 0.5;   // 損切りのバッファ(pips)
 
 //--- 発注
 input double InpLots                  = 0.01;  // ロット数
@@ -56,6 +60,9 @@ input ulong  InpSlippage              = 10;    // 許容スリッページ(point
 //--- 可視化（ビジュアルモード確認用。本番テストでは OFF 推奨）
 input bool   InpDrawSignals           = false; // シグナルをチャートに描画する
 input int    InpArrowWidth            = 3;     // 矢印のサイズ
+
+//--- デバッグ出力（原因調査用。本番テストでは OFF 推奨）
+input bool   InpDebugLog              = false; // 逆指値の予約・発動・取消をログ出力する
 
 //--- グローバル
 CTrade        g_trade;
@@ -88,11 +95,31 @@ int OnInit(void)
       return(INIT_PARAMETERS_INCORRECT);
      }
 
-   if(InpHoldBars <= 0)
+   if(InpUseHoldBars && InpHoldBars <= 0)
      {
       Print("EaPriceAction: InpHoldBars は 1 以上を指定してください");
       return(INIT_PARAMETERS_INCORRECT);
      }
+
+   if(InpUseTakeProfit && InpTPRatio <= 0.0)
+     {
+      Print("EaPriceAction: InpTPRatio は 0 より大きい値を指定してください");
+      return(INIT_PARAMETERS_INCORRECT);
+     }
+
+   //--- 負数だと買いの損切りがパターン足の安値より上、売りは高値より下へ
+   //    移動し、「損切りはパターン足の逆側」という前提が壊れる。
+   //    NormalizeStopLevel は最小ストップ距離しか見ないため回復しない。
+   if(InpSLBufferPips < 0.0)
+     {
+      Print("EaPriceAction: InpSLBufferPips は 0 以上を指定してください");
+      return(INIT_PARAMETERS_INCORRECT);
+     }
+
+   //--- 両方 OFF だと決済手段が損切りだけになり、利益方向へ動いた
+   //    ポジションが無期限に残る。設定ミスの可能性が高いため警告する。
+   if(!InpUseHoldBars && !InpUseTakeProfit)
+      Print("EaPriceAction: 警告 - N本経過も利確も無効です。決済は損切りのみになります");
 
    if(InpUseStopEntry && InpStopEntryValidBars <= 0)
      {
@@ -181,7 +208,7 @@ void OnTick(void)
    if(pos_dir != SIGNAL_NONE)
      {
       g_pos_bars_held++;
-      if(g_pos_bars_held >= InpHoldBars)
+      if(InpUseHoldBars && g_pos_bars_held >= InpHoldBars)
         {
          //--- PositionClose() の戻り値は要求送信可否のみ。約定可否は
          //    ResultRetcode() で判別する。失敗時に状態をリセットすると
@@ -210,6 +237,7 @@ void OnTick(void)
       if(g_pending.bars_left <= 0)
         {
          //--- 期限切れ（灰色の × 印）
+         DebugPending("取消(期限切れ)", g_pending.trigger);
          DrawCancel(g_pending.trigger, false);
          ClearPending();
         }
@@ -242,6 +270,7 @@ void OnTick(void)
    g_pending.invalid   = (dir == SIGNAL_LONG) ? pat_low  : pat_high;
    g_pending.bars_left = InpStopEntryValidBars;
 
+   DebugPending("予約", 0.0);
    DrawTrigger(pat_time, g_pending.trigger);
   }
 
@@ -272,6 +301,7 @@ void ProcessPending(void)
       //--- 安値を割ったらキャンセル（赤い × 印）
       if(bid <= g_pending.invalid)
         {
+         DebugPending("取消(逆側ブレイク)", g_pending.invalid);
          DrawCancel(g_pending.invalid, true);
          ClearPending();
          return;
@@ -280,6 +310,7 @@ void ProcessPending(void)
       if(ask >= g_pending.trigger)
         {
          double sl = g_pending.invalid;
+         DebugPending("発動(買い)", g_pending.trigger);
          ClearPending();
          OpenMarket(SIGNAL_LONG, 0.0, sl);
         }
@@ -289,8 +320,13 @@ void ProcessPending(void)
    if(g_pending.dir == SIGNAL_SHORT)
      {
       //--- 高値を上抜けたらキャンセル（赤い × 印）
-      if(ask >= g_pending.invalid)
+      //    判定は bid で行う。ask 基準にすると、パターン足の値幅が
+      //    スプレッド以下のとき予約と同時にキャンセルが成立してしまい、
+      //    エントリーの機会自体が発生しない（実測: 値幅19 / スプレッド19）。
+      //    チャートは bid で描画されるため見た目とも一致する。
+      if(bid >= g_pending.invalid)
         {
+         DebugPending("取消(逆側ブレイク)", g_pending.invalid);
          DrawCancel(g_pending.invalid, true);
          ClearPending();
          return;
@@ -299,6 +335,7 @@ void ProcessPending(void)
       if(bid <= g_pending.trigger)
         {
          double sl = g_pending.invalid;
+         DebugPending("発動(売り)", g_pending.trigger);
          ClearPending();
          OpenMarket(SIGNAL_SHORT, sl, 0.0);
         }
@@ -310,17 +347,77 @@ void ProcessPending(void)
 //|                                                                  |
 //| 損切りはパターン足の逆側。買いは pat_low、売りは pat_high。      |
 //| 使わない側の引数は 0.0 を渡す。                                  |
+//|                                                                  |
+//| 売りの損切りにはスプレッドを加算する。パターン足の高安は bid 基準 |
+//| だが、売りポジションの損切りは ask で発動するため、そのままでは   |
+//| スプレッド分だけ手前で狩られる。買いは bid 基準で発動するため     |
+//| 単位が揃っており加算は不要。                                     |
+//| バッファは高安ちょうどで狩られるのを避けるための余裕（両側）。   |
 //+------------------------------------------------------------------+
 void OpenMarket(const ENUM_SIGNAL_DIR dir, const double pat_high, const double pat_low)
   {
-   double sl = (dir == SIGNAL_LONG) ? pat_low : pat_high;
+   double point  = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+   int    digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
+
+   //--- pips → 価格。3/5 桁は 1pips = 10point、2/4 桁は 1pips = 1point
+   double pip    = (digits == 3 || digits == 5) ? point * 10.0 : point;
+   double buffer = InpSLBufferPips * pip;
+
+   double sl = 0.0;
+   if(dir == SIGNAL_LONG)
+      sl = pat_low - buffer;
+   else
+     {
+      double spread = (double)SymbolInfoInteger(_Symbol, SYMBOL_SPREAD) * point;
+      sl = pat_high + spread + buffer;
+     }
+
    sl = NormalizeStopLevel(dir, sl);
 
+   //--- 利確は損切りと同じ幅を約定価格から反対側へ取り、その N 倍とする。
+   //    損切り幅にはスプレッドとバッファが含まれているため、N=1.0 なら
+   //    勝ちと負けの値幅が等しくなり、勝率 50% で収支が ±0 になる。
+   //    基準はエントリー価格（買い=ask / 売り=bid）。約定前のため
+   //    現在値で代用する（成行のため実約定価格とほぼ一致する）。
+   double entry = (dir == SIGNAL_LONG)
+                  ? SymbolInfoDouble(_Symbol, SYMBOL_ASK)
+                  : SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double tp    = 0.0;
+
+   if(InpUseTakeProfit && InpTPRatio > 0.0)
+     {
+      double risk = MathAbs(entry - sl) * InpTPRatio;
+      tp = (dir == SIGNAL_LONG) ? entry + risk : entry - risk;
+
+      //--- ストップレベルは SL だけでなく TP にも適用される。InpTPRatio が
+      //    小さいと最小距離を下回り、発注が Invalid stops で拒否されるため
+      //    最小距離まで押し戻す。NormalizeStopLevel は bid/ask との比較方向が
+      //    SL 前提のため流用できず、ここで TP 用に距離を確保する。
+      double min_d = (double)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) * point;
+
+      if(dir == SIGNAL_LONG && tp - entry < min_d)
+         tp = entry + min_d;
+
+      if(dir == SIGNAL_SHORT && entry - tp < min_d)
+         tp = entry - min_d;
+
+      tp = NormalizeDouble(tp, digits);
+     }
+
+   if(InpDebugLog)
+      PrintFormat("[PA] 発注 dir=%s entry=%s sl=%s tp=%s buffer=%.1fpips spread=%dpoint",
+                  (dir == SIGNAL_LONG) ? "買い" : "売り",
+                  DoubleToString(entry, digits),
+                  DoubleToString(sl, digits),
+                  (tp > 0.0) ? DoubleToString(tp, digits) : "なし",
+                  InpSLBufferPips,
+                  (int)SymbolInfoInteger(_Symbol, SYMBOL_SPREAD));
+
    if(dir == SIGNAL_LONG)
-      ReportTradeResult("Buy", g_trade.Buy(InpLots, _Symbol, 0.0, sl, 0.0));
+      ReportTradeResult("Buy", g_trade.Buy(InpLots, _Symbol, 0.0, sl, tp));
    else
       if(dir == SIGNAL_SHORT)
-         ReportTradeResult("Sell", g_trade.Sell(InpLots, _Symbol, 0.0, sl, 0.0));
+         ReportTradeResult("Sell", g_trade.Sell(InpLots, _Symbol, 0.0, sl, tp));
 
    //--- 新規建玉の経過本数を初期化
    g_pos_bars_held = 0;
@@ -416,6 +513,34 @@ void DrawTrigger(const datetime bar_time, const double trigger)
    ObjectSetInteger(0, name, OBJPROP_STYLE, STYLE_DOT);
    ObjectSetInteger(0, name, OBJPROP_RAY_RIGHT, false);
    ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
+  }
+
+//+------------------------------------------------------------------+
+//| 逆指値の状態遷移をログ出力する                                   |
+//|                                                                  |
+//| チャート上の × 印は色でしか理由を区別できず、描画価格も呼び出し  |
+//| 元によって trigger / invalid と変わるため、位置から理由を読み取る |
+//| ことができない。予約・発動・取消の実数値をここで記録する。       |
+//| price は判定に使った価格。予約時は該当しないため 0.0 を渡す。    |
+//+------------------------------------------------------------------+
+void DebugPending(const string event, const double price)
+  {
+   if(!InpDebugLog)
+      return;
+
+   int    digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
+   string dir    = (g_pending.dir == SIGNAL_LONG) ? "買い" : "売り";
+
+   PrintFormat("[PA] %s bar=%s dir=%s trigger=%s invalid=%s bid=%s ask=%s 残=%d 判定価格=%s",
+               event,
+               TimeToString(iTime(_Symbol, (ENUM_TIMEFRAMES)_Period, 0), TIME_DATE | TIME_MINUTES),
+               dir,
+               DoubleToString(g_pending.trigger, digits),
+               DoubleToString(g_pending.invalid, digits),
+               DoubleToString(SymbolInfoDouble(_Symbol, SYMBOL_BID), digits),
+               DoubleToString(SymbolInfoDouble(_Symbol, SYMBOL_ASK), digits),
+               g_pending.bars_left,
+               (price > 0.0) ? DoubleToString(price, digits) : "-");
   }
 
 //+------------------------------------------------------------------+
