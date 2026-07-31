@@ -216,7 +216,12 @@ ENUM_SIGNAL_DIR CPriceAction::DetectEngulfing(const int shift, const double atr)
    if(!(h0 > h1 && l0 < l1))
       return(SIGNAL_NONE);
 
+   //--- 色は「陰」「陽」を各々明示的に判定する。
+   //    ドージー（c1 == o1）は色を持たないため、買い・売りのどちらでも
+   //    色反転は成立しないものとして扱う。売り側を !prev_bear で書くと
+   //    ドージーが陽線として通り、買い側と非対称になる。
    bool prev_bear = (c1 < o1);
+   bool prev_bull = (c1 > o1);
    bool curr_bull = (c0 > o0);
    bool curr_bear = (c0 < o0);
 
@@ -225,7 +230,7 @@ ENUM_SIGNAL_DIR CPriceAction::DetectEngulfing(const int shift, const double atr)
       return(SIGNAL_LONG);
 
    //--- 陽 → 陰（売り）: ② 終値が一本目の安値を割って終えていること
-   if(curr_bear && (!m_params.require_color_flip || !prev_bear) && c0 < l1)
+   if(curr_bear && (!m_params.require_color_flip || prev_bull) && c0 < l1)
       return(SIGNAL_SHORT);
 
    return(SIGNAL_NONE);
