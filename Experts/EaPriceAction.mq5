@@ -27,14 +27,10 @@
 #include <Signals\PriceAction.mqh>
 
 //--- パターン
-input ENUM_PA_PATTERN InpPattern      = PA_PINBAR; // 検証するパターン
+input ENUM_PA_PATTERN InpPattern      = PA_ENGULFING; // 検証するパターン
 
-//--- ピンバー
-input double InpPinWickRatio          = 0.66;  // ピンバー: 長ヒゲ/レンジ の下限
-input double InpPinOppositeRatio      = 0.15;  // ピンバー: 反対ヒゲ/レンジ の上限
-
-//--- 包み足 / はらみ足
-input bool   InpRequireColorFlip      = true;  // 包み/はらみ: 色の反転を必須
+//--- 包み足
+input bool   InpRequireColorFlip      = true;  // 包み足: 色の反転を必須
 
 //--- 共通フィルタ
 input double InpMinRangeATR           = 0.50;  // 共通: レンジの下限(ATR比)
@@ -141,8 +137,6 @@ int OnInit(void)
      }
 
    SPriceActionParams params;
-   params.pin_wick_ratio      = InpPinWickRatio;
-   params.pin_opposite_ratio  = InpPinOppositeRatio;
    params.require_color_flip  = InpRequireColorFlip;
    params.min_range_atr       = InpMinRangeATR;
    params.require_day_extreme = InpRequireDayExtreme;

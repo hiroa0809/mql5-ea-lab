@@ -5,6 +5,9 @@
 # ログ
 *.log
 
+# バックテスト結果（ローカル管理。銘柄名を含むため公開しない）
+docs/*.xlsx
+
 # MetaTrader 生成物
 Tester/
 Files/
