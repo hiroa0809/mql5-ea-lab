@@ -1,9 +1,12 @@
 //+------------------------------------------------------------------+
 //| PriceAction.mqh                                                  |
-//| 反転系プライスアクション検出（単一足・2本足の定番3種）           |
+//| 反転系プライスアクション検出（包み足）                           |
 //|                                                                  |
 //| 3指標エントリーの AND 条件として使う想定。単体でのプラスは        |
 //| 想定せず、トータルマイナスの回避を合格ラインとする。              |
+//|                                                                  |
+//| ピンバー・はらみ足は E4 のバックテストで優位性が無く不採用と      |
+//| なったため削除した（2026-07-31）。復活させる場合は履歴を参照。    |
 //|                                                                  |
 //| 設計:                                                            |
 //|  - 確定足のみ評価（shift>=1）。未確定足は参照しない               |
@@ -20,10 +23,10 @@
 enum ENUM_PA_PATTERN
   {
    PA_NONE      = 0, // 使用しない
-   PA_PINBAR    = 1, // ピンバー
-   PA_ENGULFING = 2, // 包み足
-   PA_HARAMI    = 3  // はらみ足
+   PA_ENGULFING = 2  // 包み足
   };
+//--- 値 2 は削除前から変えていない。既存の .set ファイルが整数で
+//    保持しているため、詰めると過去のテスト設定が別の意味になる。
 
 //+------------------------------------------------------------------+
 //| パターン検出パラメータ                                           |
@@ -32,10 +35,7 @@ enum ENUM_PA_PATTERN
 //+------------------------------------------------------------------+
 struct SPriceActionParams
   {
-   //--- ピンバー
-   double            pin_wick_ratio;      // 長ヒゲ / 全レンジ の下限
-   double            pin_opposite_ratio;  // 反対ヒゲ / 全レンジ の上限
-   //--- 包み足 / はらみ足
+   //--- 包み足
    bool              require_color_flip;  // 色の反転を必須とするか
    //--- 共通
    double            min_range_atr;       // 全レンジの下限（ATR 比）
@@ -43,8 +43,6 @@ struct SPriceActionParams
 
                      SPriceActionParams(void)
      {
-      pin_wick_ratio      = 0.66;
-      pin_opposite_ratio  = 0.15;
       require_color_flip  = true;
       min_range_atr       = 0.50;
       require_day_extreme = true;
@@ -67,10 +65,8 @@ private:
    bool              GetATR(const int shift, double &atr);
    //--- 指定 shift の足が当日高安を更新しているか
    bool              IsDayExtreme(const int shift, const ENUM_SIGNAL_DIR dir);
-   //--- 各パターンの形状判定（当日高安フィルタは含まない）
-   ENUM_SIGNAL_DIR   DetectPinBar(const int shift, const double atr);
+   //--- パターンの形状判定（当日高安フィルタは含まない）
    ENUM_SIGNAL_DIR   DetectEngulfing(const int shift, const double atr);
-   ENUM_SIGNAL_DIR   DetectHarami(const int shift, const double atr);
 
 public:
                      CPriceAction(const int atr_period = 14);
@@ -186,42 +182,6 @@ bool CPriceAction::IsDayExtreme(const int shift, const ENUM_SIGNAL_DIR dir)
   }
 
 //+------------------------------------------------------------------+
-//| ピンバー判定                                                     |
-//|                                                                  |
-//| 下ヒゲが長い → 買い / 上ヒゲが長い → 売り                        |
-//| 実体の色は問わない。                                             |
-//+------------------------------------------------------------------+
-ENUM_SIGNAL_DIR CPriceAction::DetectPinBar(const int shift, const double atr)
-  {
-   double h = iHigh(m_symbol, m_tf, shift);
-   double l = iLow(m_symbol, m_tf, shift);
-   double o = iOpen(m_symbol, m_tf, shift);
-   double c = iClose(m_symbol, m_tf, shift);
-
-   double range = h - l;
-   if(range <= 0.0 || range < atr * m_params.min_range_atr)
-      return(SIGNAL_NONE);
-
-   double body_hi = MathMax(o, c);
-   double body_lo = MathMin(o, c);
-
-   double upper_wick = h - body_hi;
-   double lower_wick = body_lo - l;
-
-   //--- 下ヒゲピンバー（買い）
-   if(lower_wick >= range * m_params.pin_wick_ratio &&
-      upper_wick <= range * m_params.pin_opposite_ratio)
-      return(SIGNAL_LONG);
-
-   //--- 上ヒゲピンバー（売り）
-   if(upper_wick >= range * m_params.pin_wick_ratio &&
-      lower_wick <= range * m_params.pin_opposite_ratio)
-      return(SIGNAL_SHORT);
-
-   return(SIGNAL_NONE);
-  }
-
-//+------------------------------------------------------------------+
 //| 包み足判定（アウトサイドバー）                                   |
 //|                                                                  |
 //| 定義（2条件とも必須・固定仕様）:                                 |
@@ -256,7 +216,12 @@ ENUM_SIGNAL_DIR CPriceAction::DetectEngulfing(const int shift, const double atr)
    if(!(h0 > h1 && l0 < l1))
       return(SIGNAL_NONE);
 
+   //--- 色は「陰」「陽」を各々明示的に判定する。
+   //    ドージー（c1 == o1）は色を持たないため、買い・売りのどちらでも
+   //    色反転は成立しないものとして扱う。売り側を !prev_bear で書くと
+   //    ドージーが陽線として通り、買い側と非対称になる。
    bool prev_bear = (c1 < o1);
+   bool prev_bull = (c1 > o1);
    bool curr_bull = (c0 > o0);
    bool curr_bear = (c0 < o0);
 
@@ -265,56 +230,7 @@ ENUM_SIGNAL_DIR CPriceAction::DetectEngulfing(const int shift, const double atr)
       return(SIGNAL_LONG);
 
    //--- 陽 → 陰（売り）: ② 終値が一本目の安値を割って終えていること
-   if(curr_bear && (!m_params.require_color_flip || !prev_bear) && c0 < l1)
-      return(SIGNAL_SHORT);
-
-   return(SIGNAL_NONE);
-  }
-
-//+------------------------------------------------------------------+
-//| はらみ足判定（インサイドバー）                                   |
-//|                                                                  |
-//| 包み足の逆。一本目の高値と安値の内側に、二本目の高値と安値が     |
-//| 完全に収まる。包み足と基準を揃え**全レンジ（ヒゲ含む）**で判定。 |
-//|                                                                  |
-//| 陰 → 陽 で買い / 陽 → 陰 で売り。                                |
-//|                                                                  |
-//| 当日高安フィルタの対象足は Detect() 側で一本目に振り替える。     |
-//| 二本目は一本目の内側に収まるため、二本目で高安を判定すると       |
-//| 原理的に成立せず常にゼロ件になる。                               |
-//+------------------------------------------------------------------+
-ENUM_SIGNAL_DIR CPriceAction::DetectHarami(const int shift, const double atr)
-  {
-   double h1 = iHigh(m_symbol,  m_tf, shift + 1);
-   double l1 = iLow(m_symbol,   m_tf, shift + 1);
-   double o1 = iOpen(m_symbol,  m_tf, shift + 1);
-   double c1 = iClose(m_symbol, m_tf, shift + 1);
-
-   double h0 = iHigh(m_symbol,  m_tf, shift);
-   double l0 = iLow(m_symbol,   m_tf, shift);
-   double o0 = iOpen(m_symbol,  m_tf, shift);
-   double c0 = iClose(m_symbol, m_tf, shift);
-
-   //--- はらみは一本目が大きいことが前提。下限は一本目のレンジで見る
-   double prev_range = h1 - l1;
-   if(prev_range <= 0.0 || prev_range < atr * m_params.min_range_atr)
-      return(SIGNAL_NONE);
-
-   //--- 一本目の高値・安値の内側に完全に収まっていること（ヒゲ含む）
-   //    同値は「収まった」と見なさないため等号を含めない
-   if(!(h0 < h1 && l0 > l1))
-      return(SIGNAL_NONE);
-
-   bool prev_bear = (c1 < o1);
-   bool curr_bull = (c0 > o0);
-   bool curr_bear = (c0 < o0);
-
-   //--- 陰 → 陽（買い）
-   if(curr_bull && (!m_params.require_color_flip || prev_bear))
-      return(SIGNAL_LONG);
-
-   //--- 陽 → 陰（売り）
-   if(curr_bear && (!m_params.require_color_flip || !prev_bear))
+   if(curr_bear && (!m_params.require_color_flip || prev_bull) && c0 < l1)
       return(SIGNAL_SHORT);
 
    return(SIGNAL_NONE);
@@ -338,35 +254,16 @@ ENUM_SIGNAL_DIR CPriceAction::Detect(const ENUM_PA_PATTERN pattern, const int sh
    if(!GetATR(shift, atr))
       return(SIGNAL_NONE);
 
-   ENUM_SIGNAL_DIR dir = SIGNAL_NONE;
+   if(pattern != PA_ENGULFING)
+      return(SIGNAL_NONE);
 
-   //--- 当日高安を判定する対象足。既定はパターンを形成した足自身
-   int extreme_shift = shift;
-
-   switch(pattern)
-     {
-      case PA_PINBAR:
-         dir = DetectPinBar(shift, atr);
-         break;
-      case PA_ENGULFING:
-         dir = DetectEngulfing(shift, atr);
-         break;
-      case PA_HARAMI:
-         dir = DetectHarami(shift, atr);
-         //--- はらみ足は定義上、二本目が一本目の内側に収まる。
-         //    二本目が当日高安を更新することは原理的にありえないため、
-         //    高安の判定は一本目（大きい方の足）を対象とする。
-         extreme_shift = shift + 1;
-         break;
-      default:
-         return(SIGNAL_NONE);
-     }
-
+   ENUM_SIGNAL_DIR dir = DetectEngulfing(shift, atr);
    if(dir == SIGNAL_NONE)
       return(SIGNAL_NONE);
 
    //--- 当日高安の更新を必須とする場合はここで絞る
-   if(m_params.require_day_extreme && !IsDayExtreme(extreme_shift, dir))
+   //    判定対象はパターンを形成した足自身
+   if(m_params.require_day_extreme && !IsDayExtreme(shift, dir))
       return(SIGNAL_NONE);
 
    return(dir);

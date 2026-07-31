@@ -2,7 +2,7 @@
 //| PriceActionViewer.mq5                                            |
 //| プライスアクション検出結果をチャート上に矢印表示する             |
 //|                                                                  |
-//| 目的は目視での認識合わせ。「ピンバー」等の定義が利用者の認識と   |
+//| 目的は目視での認識合わせ。「包み足」の定義が利用者の認識と       |
 //| 一致しているかを確認するためのもので、売買は行わない。           |
 //|                                                                  |
 //| 買いシグナル: 安値の下に上向き矢印                               |
@@ -30,14 +30,10 @@
 #include <Signals\PriceAction.mqh>
 
 //--- 検出パターン
-input ENUM_PA_PATTERN InpPattern           = PA_PINBAR; // パターン
+input ENUM_PA_PATTERN InpPattern           = PA_ENGULFING; // パターン
 
-//--- ピンバー
-input double InpPinWickRatio               = 0.66;  // ピンバー: 長ヒゲ/レンジ の下限
-input double InpPinOppositeRatio           = 0.15;  // ピンバー: 反対ヒゲ/レンジ の上限
-
-//--- 包み足 / はらみ足
-input bool   InpRequireColorFlip           = true;  // 包み/はらみ: 色の反転を必須
+//--- 包み足
+input bool   InpRequireColorFlip           = true;  // 包み足: 色の反転を必須
 
 //--- 共通
 input double InpMinRangeATR                = 0.50;  // 共通: レンジの下限(ATR比)
@@ -79,8 +75,6 @@ int OnInit(void)
       return(INIT_FAILED);
 
    SPriceActionParams params;
-   params.pin_wick_ratio      = InpPinWickRatio;
-   params.pin_opposite_ratio  = InpPinOppositeRatio;
    params.require_color_flip  = InpRequireColorFlip;
    params.min_range_atr       = InpMinRangeATR;
    params.require_day_extreme = InpRequireDayExtreme;
