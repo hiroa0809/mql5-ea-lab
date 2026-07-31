@@ -22,6 +22,20 @@
 - 制限中に再レビューしたい場合は、時間を置いてから PR に `@coderabbitai review` とコメントする（新規 push でも起動する）。
 - 従量課金（$0.25/ファイル）を有効にすれば即時レビューできるが、通常は待てばよい。
 
+#### `@coderabbitai review` が効く条件（2026-07-31 PR #4 で確定）
+
+「このコマンドは新規指摘ゼロになる」は**条件付き**。bot の注記どおり **`This command is applicable only when automatic reviews are paused.`**（自動レビューが停止している場合にのみ有効）であり、実際の挙動は状況で分かれる。
+
+| 状況 | `@coderabbitai review` の結果 |
+|---|---|
+| コミットが既にレビュー済み | **新規指摘ゼロ**。増分方式のため再レビューしない（2026-07-26 PR #2） |
+| **レート制限で自動レビューが走らなかった** | **実際にレビューされる**（2026-07-31 PR #4 で確認） |
+
+- レート制限が解除されても、**制限中に来た push は遡って自動レビューされない**。手動起動が必須。
+- 待ち時間は制限コメントに `Next review available in: N minutes` と明記される。**この N はコメントの投稿時刻が起点**（`created_at` ではなく `updated_at` を見る。ウォークスルーのコメントが更新される形で通知されるため）。
+- 起動後の完了判定は `gh pr checks` を `PENDING`（Review in progress）→ `SUCCESS`（Review completed）と遷移するまでポーリングする。
+- **実際にレビューされたかの裏取り**は、ウォークスルーの `Reviewing files that changed ... between <old_sha> and <new_sha>` と `Files selected for processing (N)` を読む。応答が `Action performed / Review finished` だけでは、増分スキップと区別できない。
+
 ## MQL5 ビルド（コンパイル検証）
 
 MT5 同梱の MetaEditor を CLI で呼ぶ。VSCode 拡張は不要。**使用ブローカーは XM** なので XM の MetaEditor を使う。
