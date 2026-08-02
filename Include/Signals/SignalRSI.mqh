@@ -1,6 +1,8 @@
 //+------------------------------------------------------------------+
 //| SignalRSI.mqh                                                    |
-//| RSI(9) 30/70 逆張りエントリー ＋ RSI 50 回帰エグジット           |
+//| RSI(9) 30/70 逆張りエントリー                                    |
+//|                                                                  |
+//| 決済は本部品では扱わない（N 本タイムストップを EA 本体が担当）。 |
 //|                                                                  |
 //| 仕様: docs/entry_signal_spec.md §2.3                             |
 //+------------------------------------------------------------------+
@@ -19,7 +21,6 @@ private:
    int               m_period;        // RSI 期間
    double            m_lower;         // 売られすぎ閾値
    double            m_upper;         // 買われすぎ閾値
-   double            m_exit_level;    // エグジット回帰レベル
    double            m_prev;          // 1 本前の確定足の RSI
    double            m_curr;          // 直近確定足の RSI
    bool              m_ready;         // prev/curr が揃ったか
@@ -27,14 +28,12 @@ private:
 public:
                      CSignalRSI(const int period = 9,
                                 const double lower = 30.0,
-                                const double upper = 70.0,
-                                const double exit_level = 50.0);
+                                const double upper = 70.0);
                     ~CSignalRSI(void);
 
    virtual bool      Init(const string symbol, const ENUM_TIMEFRAMES tf);
    virtual bool      Update(void);
    virtual ENUM_SIGNAL_DIR Entry(void);
-   virtual bool      ShouldExit(const ENUM_SIGNAL_DIR position_dir);
   };
 
 //+------------------------------------------------------------------+
@@ -42,14 +41,12 @@ public:
 //+------------------------------------------------------------------+
 CSignalRSI::CSignalRSI(const int period,
                        const double lower,
-                       const double upper,
-                       const double exit_level)
+                       const double upper)
   {
    m_handle     = INVALID_HANDLE;
    m_period     = period;
    m_lower      = lower;
    m_upper      = upper;
-   m_exit_level = exit_level;
    m_prev       = 0.0;
    m_curr       = 0.0;
    m_ready      = false;
@@ -119,25 +116,5 @@ ENUM_SIGNAL_DIR CSignalRSI::Entry(void)
       return(SIGNAL_SHORT);
 
    return(SIGNAL_NONE);
-  }
-
-//+------------------------------------------------------------------+
-//| エグジット判定                                                   |
-//|                                                                  |
-//| Long 保有中: RSI が 50 を上抜けたら決済                          |
-//| Short 保有中: RSI が 50 を下抜けたら決済                         |
-//+------------------------------------------------------------------+
-bool CSignalRSI::ShouldExit(const ENUM_SIGNAL_DIR position_dir)
-  {
-   if(!m_ready)
-      return(false);
-
-   if(position_dir == SIGNAL_LONG)
-      return(CrossedAbove(m_prev, m_curr, m_exit_level));
-
-   if(position_dir == SIGNAL_SHORT)
-      return(CrossedBelow(m_prev, m_curr, m_exit_level));
-
-   return(false);
   }
 //+------------------------------------------------------------------+

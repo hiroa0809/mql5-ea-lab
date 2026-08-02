@@ -1,28 +1,29 @@
 //+------------------------------------------------------------------+
 //| EaLab.mq5                                                        |
-//| オシレータ逆張り EA（CodeRabbit 検証用の最小実装）               |
+//| オシレータ逆張り EA                                              |
 //|                                                                  |
 //| エントリー: RSI(9) が 30 を下抜け → 買い / 70 を上抜け → 売り    |
-//| エグジット: RSI が 50 をクロスしたら決済                         |
-//| 損切り: なし（RSI 50 回帰のみで手仕舞う）                        |
+//| エグジット: エントリー足から N 本後の始値で無条件決済（既定 24） |
+//| 損切り: なし（N 本タイムストップのみ）                           |
 //|                                                                  |
-//| 仕様: docs/entry_signal_spec.md                                  |
+//| 仕様: docs/entry_signal_spec.md（採用構成は §1.2）               |
 //+------------------------------------------------------------------+
 #property copyright "mql5-ea-lab"
-#property version   "1.00"
+#property version   "2.00"
 #property strict
 
 #include <Trade\Trade.mqh>
 #include <Signals\SignalRSI.mqh>
 
 //--- 入力パラメータ
-input int    InpRsiPeriod    = 9;      // RSI 期間
-input double InpRsiLower     = 30.0;   // 売られすぎ閾値（買いエントリー）
-input double InpRsiUpper     = 70.0;   // 買われすぎ閾値（売りエントリー）
-input double InpRsiExitLevel = 50.0;   // エグジット回帰レベル
-input double InpLots         = 0.01;   // ロット数
-input ulong  InpMagic        = 20260726; // マジックナンバー
-input ulong  InpSlippage     = 10;     // 許容スリッページ(points)
+input int    InpRsiPeriod   = 9;      // RSI 期間
+input double InpRsiLower    = 30.0;   // 売られすぎ閾値（買いエントリー）
+input double InpRsiUpper    = 70.0;   // 買われすぎ閾値（売りエントリー）
+input int    InpExitBars    = 24;     // 決済までの保有本数 N
+input bool   InpAllowOverlap = true;  // 保有中も新規エントリーする（重複保有）
+input double InpLots        = 0.01;   // ロット数
+input ulong  InpMagic       = 20260726; // マジックナンバー
+input ulong  InpSlippage    = 10;     // 許容スリッページ(points)
 
 //--- グローバル
 CTrade      g_trade;
@@ -34,7 +35,23 @@ datetime    g_last_bar_time = 0;
 //+------------------------------------------------------------------+
 int OnInit(void)
   {
-   g_signal = new CSignalRSI(InpRsiPeriod, InpRsiLower, InpRsiUpper, InpRsiExitLevel);
+   if(InpExitBars < 1)
+     {
+      PrintFormat("EaLab: InpExitBars は 1 以上にしてください (現在 %d)", InpExitBars);
+      return(INIT_PARAMETERS_INCORRECT);
+     }
+
+   //--- 重複保有はネッティング口座では成立しない（建玉が相殺・合算される）。
+   //--- 黙って別物の結果を出すより起動時に弾く。
+   if(InpAllowOverlap &&
+      (ENUM_ACCOUNT_MARGIN_MODE)AccountInfoInteger(ACCOUNT_MARGIN_MODE) != ACCOUNT_MARGIN_MODE_RETAIL_HEDGING)
+     {
+      Print("EaLab: 重複保有(InpAllowOverlap=true)にはヘッジ口座が必要です。",
+            "ネッティング口座では建玉が合算され、検証条件と別物になります");
+      return(INIT_FAILED);
+     }
+
+   g_signal = new CSignalRSI(InpRsiPeriod, InpRsiLower, InpRsiUpper);
    if(g_signal == NULL)
      {
       Print("EaLab: シグナル部品の生成に失敗しました");
@@ -72,36 +89,89 @@ void OnDeinit(const int reason)
 //|                                                                  |
 //| 判定は確定足単位。新しい足が生成された最初のティックでのみ      |
 //| 評価し、その足の始値付近で成行発注する。                        |
+//|                                                                  |
+//| 決済はシグナルの取得可否に依存させない（先に処理する）。        |
 //+------------------------------------------------------------------+
 void OnTick(void)
   {
    if(!IsNewBar())
       return;
 
+   CloseExpiredPositions();
+
    if(!g_signal.Update())
       return;
 
-   //--- 保有中なら決済判定を優先
-   ulong pos_ticket = 0;
-   ENUM_SIGNAL_DIR pos_dir = CurrentPositionDir(pos_ticket);
-   if(pos_dir != SIGNAL_NONE)
-     {
-      if(g_signal.ShouldExit(pos_dir))
-        {
-         //--- ヘッジ口座で他ポジションを巻き込まないよう ticket 指定で決済
-         bool sent = g_trade.PositionClose(pos_ticket);
-         ReportTradeResult("PositionClose", sent);
-        }
-      return;
-     }
-
-   //--- ノーポジションならエントリー判定
    ENUM_SIGNAL_DIR entry = g_signal.Entry();
+   if(entry == SIGNAL_NONE)
+      return;
+
+   //--- 重複を許さない設定なら、保有中は新規シグナルを捨てる
+   if(!InpAllowOverlap && HasOpenPosition())
+      return;
+
    if(entry == SIGNAL_LONG)
       ReportTradeResult("Buy", g_trade.Buy(InpLots, _Symbol));
    else
-      if(entry == SIGNAL_SHORT)
-         ReportTradeResult("Sell", g_trade.Sell(InpLots, _Symbol));
+      ReportTradeResult("Sell", g_trade.Sell(InpLots, _Symbol));
+  }
+
+//+------------------------------------------------------------------+
+//| N 本タイムストップ                                               |
+//|                                                                  |
+//| エントリー足から数えて N 本後の足で決済する。経過時間ではなく    |
+//| 足数で数えるため、週末やギャップで足が飛んでも本数は狂わない。   |
+//| （研究側 forward_return.py の exit_pos = entry_pos + N と同じ）  |
+//|                                                                  |
+//| ヘッジ口座では同一シンボルに複数ポジションが並ぶため、決済は    |
+//| 必ず ticket 指定で行う。                                         |
+//+------------------------------------------------------------------+
+void CloseExpiredPositions(void)
+  {
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+     {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket == 0)
+         continue;
+
+      if(PositionGetString(POSITION_SYMBOL) != _Symbol)
+         continue;
+
+      if(PositionGetInteger(POSITION_MAGIC) != (long)InpMagic)
+         continue;
+
+      datetime opened = (datetime)PositionGetInteger(POSITION_TIME);
+      int bars_held = iBarShift(_Symbol, _Period, opened, false);
+      if(bars_held < 0)
+        {
+         PrintFormat("EaLab: 保有本数を取得できません (ticket=%I64u, error=%d)",
+                     ticket, GetLastError());
+         continue;
+        }
+
+      if(bars_held >= InpExitBars)
+         ReportTradeResult("PositionClose", g_trade.PositionClose(ticket));
+     }
+  }
+
+//+------------------------------------------------------------------+
+//| 自 EA のポジションを保有しているか                               |
+//+------------------------------------------------------------------+
+bool HasOpenPosition(void)
+  {
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+     {
+      if(PositionGetTicket(i) == 0)
+         continue;
+
+      if(PositionGetString(POSITION_SYMBOL) != _Symbol)
+         continue;
+
+      if(PositionGetInteger(POSITION_MAGIC) == (long)InpMagic)
+         return(true);
+     }
+
+   return(false);
   }
 
 //+------------------------------------------------------------------+
@@ -138,43 +208,5 @@ bool IsNewBar(void)
 
    g_last_bar_time = current;
    return(true);
-  }
-
-//+------------------------------------------------------------------+
-//| 自 EA が保有中のポジション方向を返す                             |
-//|                                                                  |
-//| ticket は out 引数で返す。ヘッジ口座では同一シンボルに複数        |
-//| ポジションが並びうるため、決済は必ず ticket 指定で行う。         |
-//+------------------------------------------------------------------+
-ENUM_SIGNAL_DIR CurrentPositionDir(ulong &ticket)
-  {
-   ticket = 0;
-
-   for(int i = PositionsTotal() - 1; i >= 0; i--)
-     {
-      ulong t = PositionGetTicket(i);
-      if(t == 0)
-         continue;
-
-      if(PositionGetString(POSITION_SYMBOL) != _Symbol)
-         continue;
-
-      if(PositionGetInteger(POSITION_MAGIC) != (long)InpMagic)
-         continue;
-
-      long type = PositionGetInteger(POSITION_TYPE);
-      if(type == POSITION_TYPE_BUY)
-        {
-         ticket = t;
-         return(SIGNAL_LONG);
-        }
-      if(type == POSITION_TYPE_SELL)
-        {
-         ticket = t;
-         return(SIGNAL_SHORT);
-        }
-     }
-
-   return(SIGNAL_NONE);
   }
 //+------------------------------------------------------------------+
