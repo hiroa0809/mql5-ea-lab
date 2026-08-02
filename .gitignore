@@ -5,8 +5,12 @@
 # ログ
 *.log
 
-# バックテスト結果（ローカル管理。銘柄名を含むため公開しない）
+# バックテスト結果の生データ（ローカル管理。数MB の MT5 レポートでリポジトリに載せる必要がない）
 docs/*.xlsx
+
+# 前プロジェクトから持ち込んだ検証データ（ローカル管理。計 4.5MB。出典は research/README.md）
+research/**
+!research/README.md
 
 # MetaTrader 生成物
 Tester/

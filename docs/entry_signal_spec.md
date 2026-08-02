@@ -46,7 +46,7 @@ prev <  upper_threshold  AND  curr >= upper_threshold  → Short
 
 | 項目 | 確定値 |
 |---|---|
-| 対象ペア | 開発対象ペア 1 種（**銘柄名は本リポジトリに記載しない**。公開リポジトリのためローカル管理） |
+| 対象ペア | **USDCNH**（EA 側の銘柄名は `USDCNH#`） |
 | 時間足 | **15 分足** |
 | エントリー | 帯へ突入した確定足の**次の足の始値**で成行（§1.1） |
 | **決済** | **N24 — エントリーから 24 本後（6 時間）に無条件決済** |
@@ -62,7 +62,8 @@ prev <  upper_threshold  AND  curr >= upper_threshold  → Short
 | **RSI(9) 30/70** | **2.48 pips** | 5.06 pips | 6,019 / 4,573 |
 
 - 優位性は**1 トレードあたり数 pips と薄い**。スプレッド前提が崩れると即座に赤字化する。
-- 出典は前プロジェクト `OLS-MeanReversion_MT5` の `research/`（`ea-component-edge.md`、`research/results/phase1_combined_*.csv`）。**別リポジトリにあるため参照が切れやすい**点に注意。
+- 出典は前プロジェクト `OLS-MeanReversion_MT5` の `research/`（`ea-component-edge.md`）。**主要な生データは本リポジトリの `research/` に複製済み**（`.gitignore` 済み・ローカル管理。詳細は `research/README.md`）。
+- 検証データで N24 の裏付けを確認する手順: `research/results/phase1_combined_cells.csv` を `symbol=USDCNH, tf=15m` で絞ると、N=12 / N=24 が `oos_survivor=True`、**N=3 / N=6 が `False`** であることを確認できる。
 
 ---
 
