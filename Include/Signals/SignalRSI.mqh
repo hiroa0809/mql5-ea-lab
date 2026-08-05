@@ -34,6 +34,11 @@ public:
    virtual bool      Init(const string symbol, const ENUM_TIMEFRAMES tf);
    virtual bool      Update(void);
    virtual ENUM_SIGNAL_DIR Entry(void);
+
+   //--- 決済判定を EA 本体で行うための値の公開
+   double            Prev(void)  const { return(m_prev); }
+   double            Curr(void)  const { return(m_curr); }
+   bool              Ready(void) const { return(m_ready); }
   };
 
 //+------------------------------------------------------------------+
