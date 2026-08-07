@@ -44,6 +44,7 @@ input string InpCsvPrefix         = "n0_spread"; // CSV のファイル名プレ
 
 //--- グローバル
 CTrade  g_trade;
+bool    g_initialized = false;   // OnInit が成功したか（OnDeinit の出力可否に使う）
 double  g_point       = 0.0;
 double  g_pip         = 0.0;      // 3/5桁は 10point、2/4桁は 1point
 int     g_digits      = 0;
@@ -92,15 +93,17 @@ int OnInit(void)
       return(INIT_PARAMETERS_INCORRECT);
      }
 
-   g_point  = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
-   g_digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
-   g_pip    = (g_digits == 3 || g_digits == 5) ? g_point * 10.0 : g_point;
+   g_point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
 
+   //--- g_pip は g_point から作るため、検査を算出より前に置く
    if(g_point <= 0.0)
      {
       Print("SpreadProbe: SYMBOL_POINT を取得できませんでした。");
       return(INIT_FAILED);
      }
+
+   g_digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
+   g_pip    = (g_digits == 3 || g_digits == 5) ? g_point * 10.0 : g_point;
 
    ArrayInitialize(g_hist, 0);
    ArrayInitialize(g_hour_count, 0);
@@ -121,6 +124,7 @@ int OnInit(void)
                DoubleToString(SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE), 8),
                DoubleToString(SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE), 5));
 
+   g_initialized = true;
    return(INIT_SUCCEEDED);
   }
 
@@ -205,9 +209,18 @@ void SampleSpread(void)
 //+------------------------------------------------------------------+
 void RunProbe(void)
   {
-   //--- 既存の建玉があるなら見送る（前回の決済が通っていない状態）
-   if(FindOurPosition() != 0)
+   //--- 既存の建玉が残っている＝前回の決済が通っていない。黙って見送ると
+   //    以降の計測が全て素通りし、「なぜ件数が少ないのか」が要約から読めない
+   //    （lessons_learned.md の「無言で取引0」と同じ形）。失敗として数え、
+   //    再決済を試みてから戻る。
+   ulong stale = FindOurPosition();
+   if(stale != 0)
+     {
+      g_probe_fail++;
+      PrintFormat("SpreadProbe: 前回の建玉 #%I64u が残っています。再決済を試みます。", stale);
+      ReportTradeResult("PositionClose(残留)", g_trade.PositionClose(stale));
       return;
+     }
 
    double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
    double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
@@ -265,6 +278,14 @@ void RecordProbeResult(const long pos_id, const long quoted_pts)
    double price_out  = 0.0;
    datetime time_in  = 0;
 
+   //--- 分割約定に備えて出来高で加重する。単純に上書きすると最後の約定価格
+   //    だけが残り、黙って誤った往復コストを出す。0.01 ロットではまず起きない
+   //    が、InpLots は input で変えられる。
+   double vol_in     = 0.0;
+   double vol_out    = 0.0;
+   double px_vol_in  = 0.0;
+   double px_vol_out = 0.0;
+
    int deals = HistoryDealsTotal();
    for(int i = 0; i < deals; i++)
      {
@@ -276,16 +297,39 @@ void RecordProbeResult(const long pos_id, const long quoted_pts)
       commission += HistoryDealGetDouble(deal, DEAL_COMMISSION);
       swap       += HistoryDealGetDouble(deal, DEAL_SWAP);
 
+      double price  = HistoryDealGetDouble(deal, DEAL_PRICE);
+      double volume = HistoryDealGetDouble(deal, DEAL_VOLUME);
+      if(volume <= 0.0)
+         continue;
+
       long entry = HistoryDealGetInteger(deal, DEAL_ENTRY);
       if(entry == DEAL_ENTRY_IN)
         {
-         price_in = HistoryDealGetDouble(deal, DEAL_PRICE);
-         time_in  = (datetime)HistoryDealGetInteger(deal, DEAL_TIME);
+         px_vol_in += price * volume;
+         vol_in    += volume;
+
+         //--- 分割約定なら最初の約定時刻を計測時刻とする
+         datetime t = (datetime)HistoryDealGetInteger(deal, DEAL_TIME);
+         if(time_in == 0 || t < time_in)
+            time_in = t;
         }
       else
          if(entry == DEAL_ENTRY_OUT)
-            price_out = HistoryDealGetDouble(deal, DEAL_PRICE);
+           {
+            px_vol_out += price * volume;
+            vol_out    += volume;
+           }
      }
+
+   if(vol_in <= 0.0 || vol_out <= 0.0)
+     {
+      Print("SpreadProbe: 約定履歴に出来高がありませんでした。");
+      g_probe_fail++;
+      return;
+     }
+
+   price_in  = px_vol_in / vol_in;
+   price_out = px_vol_out / vol_out;
 
    if(price_in <= 0.0 || price_out <= 0.0)
      {
@@ -376,11 +420,25 @@ bool IsNewBar(void)
   }
 
 //+------------------------------------------------------------------+
+//| CSV のファイル名を作る                                           |
+//|                                                                  |
+//| 銘柄と時間足を名前に入れる。M5 と M15 の両方を測る計画のため     |
+//| （docs/trading_rules.md §2.2）、固定名だと2回目の実行が1回目を   |
+//| 消す。実行時刻は入れない。区別が要るのは測定条件の違いであって   |
+//| 実行回数ではなく、同条件の再実行は上書きされるほうが探しやすい。 |
+//+------------------------------------------------------------------+
+string CsvName(const string kind)
+  {
+   return(StringFormat("%s_%s_%s_%s.csv", InpCsvPrefix, _Symbol,
+                       EnumToString((ENUM_TIMEFRAMES)_Period), kind));
+  }
+
+//+------------------------------------------------------------------+
 //| 方式B の CSV を開く                                              |
 //+------------------------------------------------------------------+
 bool OpenTradesCsv(void)
   {
-   string name = InpCsvPrefix + "_trades.csv";
+   string name = CsvName("trades");
 
    g_csv_trades = FileOpen(name, FILE_WRITE | FILE_CSV | FILE_ANSI | FILE_COMMON, ',');
    if(g_csv_trades == INVALID_HANDLE)
@@ -448,6 +506,16 @@ void OnDeinit(const int reason)
       g_csv_trades = INVALID_HANDLE;
      }
 
+   //--- OnInit が INIT_FAILED を返しても OnDeinit は呼ばれる
+   //    （DEINIT_REASON_INITFAILED）。素通しにすると、テスター外で
+   //    誤起動しただけで前回の測定結果を空ファイルで上書きしてしまう。
+   //    g_point が 0.0 のままゼロ除算にもなる。
+   if(!g_initialized)
+     {
+      Print("SpreadProbe: 初期化に失敗したため要約を出力しません（既存の CSV は残します）。");
+      return;
+     }
+
    WriteSummary();
   }
 
@@ -456,7 +524,7 @@ void OnDeinit(const int reason)
 //+------------------------------------------------------------------+
 void WriteSummary(void)
   {
-   string name = InpCsvPrefix + "_summary.csv";
+   string name = CsvName("summary");
    int fh = FileOpen(name, FILE_WRITE | FILE_CSV | FILE_ANSI | FILE_COMMON, ',');
 
    if(fh == INVALID_HANDLE)
@@ -556,8 +624,8 @@ void WriteSummary(void)
    if(fh != INVALID_HANDLE)
      {
       FileClose(fh);
-      PrintFormat("SpreadProbe: CSV を共有フォルダ(Common\\Files)へ出力しました: %s_trades.csv / %s_summary.csv",
-                  InpCsvPrefix, InpCsvPrefix);
+      PrintFormat("SpreadProbe: CSV を共有フォルダ(Common\\Files)へ出力しました: %s / %s",
+                  CsvName("trades"), CsvName("summary"));
      }
   }
 
