@@ -73,6 +73,7 @@ long     g_month_min[MONTH_SLOTS];
 long     g_month_max[MONTH_SLOTS];
 datetime g_first_tick = 0;
 datetime g_last_tick  = 0;
+string   g_run_stamp  = "";      // 実行ごとに一意。CSV の上書き事故を防ぐ
 
 //--- 方式B
 int      g_bar_count   = 0;
@@ -120,6 +121,9 @@ int OnInit(void)
 
    g_digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
    g_pip    = (g_digits == 3 || g_digits == 5) ? g_point * 10.0 : g_point;
+
+   //--- CSV 名を作る前に確定させる（trades と summary で同じ値を使う）
+   g_run_stamp = MakeRunStamp();
 
    ArrayInitialize(g_hist, 0);
    ArrayInitialize(g_hour_count, 0);
@@ -475,15 +479,37 @@ bool IsNewBar(void)
 //+------------------------------------------------------------------+
 //| CSV のファイル名を作る                                           |
 //|                                                                  |
-//| 銘柄と時間足を名前に入れる。M5 と M15 の両方を測る計画のため     |
-//| （docs/trading_rules.md §2.2）、固定名だと2回目の実行が1回目を   |
-//| 消す。実行時刻は入れない。区別が要るのは測定条件の違いであって   |
-//| 実行回数ではなく、同条件の再実行は上書きされるほうが探しやすい。 |
+//| 銘柄・時間足に加えて実行時刻を入れる。同じ銘柄・時間足で期間や   |
+//| 遅延設定を変えて測り直すことが実際に頻発し、固定名では前の結果が |
+//| 黙って消える（2026-08-07 に2度発生）。入力パラメータを毎回変える |
+//| 運用に頼らず、既定で安全側にする。                               |
+//|                                                                  |
+//| 測定条件そのものは要約 CSV の first_tick / last_tick に入るため、|
+//| ファイル名で期間を表す必要はない。                               |
 //+------------------------------------------------------------------+
 string CsvName(const string kind)
   {
-   return(StringFormat("%s_%s_%s_%s.csv", InpCsvPrefix, _Symbol,
-                       EnumToString((ENUM_TIMEFRAMES)_Period), kind));
+   return(StringFormat("%s_%s_%s_%s_%s.csv", InpCsvPrefix, _Symbol,
+                       EnumToString((ENUM_TIMEFRAMES)_Period), g_run_stamp, kind));
+  }
+
+//+------------------------------------------------------------------+
+//| 実行ごとに一意な文字列を作る                                     |
+//|                                                                  |
+//| テスター内では TimeLocal() が**シミュレーション時刻**を返すため、 |
+//| ここで得られるのはテスト開始日になる。期間の識別には都合が良い    |
+//| 一方、同じ期間で遅延設定だけ変えて測り直すと衝突して前の結果が    |
+//| 消える（2026-08-07 に実際に発生）。実時間由来の GetTickCount()   |
+//| を足して一意性を担保する。                                       |
+//+------------------------------------------------------------------+
+string MakeRunStamp(void)
+  {
+   string s = TimeToString(TimeLocal(), TIME_DATE | TIME_MINUTES);
+   StringReplace(s, ".", "");
+   StringReplace(s, ":", "");
+   StringReplace(s, " ", "_");
+
+   return(StringFormat("%s_%06u", s, (uint)(GetTickCount() % 1000000)));
   }
 
 //+------------------------------------------------------------------+
