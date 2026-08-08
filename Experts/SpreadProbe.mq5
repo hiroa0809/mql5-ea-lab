@@ -487,10 +487,15 @@ bool IsNewBar(void)
 //| 測定条件そのものは要約 CSV の first_tick / last_tick に入るため、|
 //| ファイル名で期間を表す必要はない。                               |
 //+------------------------------------------------------------------+
-string CsvName(const string kind)
+string CsvNameFor(const string stamp, const string kind)
   {
    return(StringFormat("%s_%s_%s_%s_%s.csv", InpCsvPrefix, _Symbol,
-                       EnumToString((ENUM_TIMEFRAMES)_Period), g_run_stamp, kind));
+                       EnumToString((ENUM_TIMEFRAMES)_Period), stamp, kind));
+  }
+
+string CsvName(const string kind)
+  {
+   return(CsvNameFor(g_run_stamp, kind));
   }
 
 //+------------------------------------------------------------------+
@@ -499,8 +504,13 @@ string CsvName(const string kind)
 //| テスター内では TimeLocal() が**シミュレーション時刻**を返すため、 |
 //| ここで得られるのはテスト開始日になる。期間の識別には都合が良い    |
 //| 一方、同じ期間で遅延設定だけ変えて測り直すと衝突して前の結果が    |
-//| 消える（2026-08-07 に実際に発生）。実時間由来の GetTickCount()   |
-//| を足して一意性を担保する。                                       |
+//| 消える（2026-08-07 に実際に発生）。                              |
+//|                                                                  |
+//| GetTickCount() を足しただけでは足りない。同関数は OS 起動からの   |
+//| ミリ秒で、% 1000000 は約16分40秒で一周するため、再実行の間隔次第  |
+//| で同じ値になり得る。FILE_WRITE は既存ファイルを即座に空にする     |
+//| ので、衝突すると前回の測定結果が失われる。                       |
+//| 最終的な一意性は FileIsExist による実在確認で担保する。           |
 //+------------------------------------------------------------------+
 string MakeRunStamp(void)
   {
@@ -509,7 +519,20 @@ string MakeRunStamp(void)
    StringReplace(s, ":", "");
    StringReplace(s, " ", "_");
 
-   return(StringFormat("%s_%06u", s, (uint)(GetTickCount() % 1000000)));
+   string base = StringFormat("%s_%06u", s, (uint)(GetTickCount() % 1000000));
+
+//--- trades / summary の**両方**が空いている名前になるまで連番を足す
+   string cand = base;
+   for(int seq = 1; seq <= 999; seq++)
+     {
+      if(!FileIsExist(CsvNameFor(cand, "trades"),  FILE_COMMON)
+         && !FileIsExist(CsvNameFor(cand, "summary"), FILE_COMMON))
+         return(cand);
+
+      cand = StringFormat("%s_%03d", base, seq);
+     }
+
+   return(cand);
   }
 
 //+------------------------------------------------------------------+
@@ -664,9 +687,9 @@ void WriteSummary(void)
       //--- 月別。min == max の月は実ティックが無く合成データで埋められている。
       //    一部の月だけ合成でも全体の distinct_spread_values は 1 にならず
       //    警告が出ないため、境界はここで特定する。
-      WriteRow(fh, "month", "month", "count", "mean_pips", "min_pips", "max_pips", "synthetic");
-      int synthetic_months = 0;
-      int observed_months  = 0;
+      WriteRow(fh, "month", "month", "count", "mean_pips", "min_pips", "max_pips", "flat");
+      int flat_months     = 0;
+      int observed_months = 0;
 
       for(int s = 0; s < MONTH_SLOTS; s++)
         {
@@ -678,7 +701,7 @@ void WriteSummary(void)
          double mean = (double)g_month_sum[s] / (double)g_month_count[s];
          bool   flat = (g_month_min[s] == g_month_max[s]);
          if(flat)
-            synthetic_months++;
+            flat_months++;
 
          WriteRow(fh, "month",
                   StringFormat("%04d-%02d", MONTH_BASE_YEAR + s / 12, (s % 12) + 1),
@@ -689,12 +712,16 @@ void WriteSummary(void)
                   flat ? "YES" : "");
         }
 
-      WriteRow(fh, "month_check", "observed_months",  (string)observed_months,  "", "", "", "");
-      WriteRow(fh, "month_check", "synthetic_months", (string)synthetic_months, "", "", "", "");
+      WriteRow(fh, "month_check", "observed_months", (string)observed_months, "", "", "", "");
+      WriteRow(fh, "month_check", "flat_months",     (string)flat_months,     "", "", "", "");
 
-      if(synthetic_months > 0)
-         PrintFormat("SpreadProbe [警告] %d/%d ヶ月でスプレッドが一定でした。その月は実ティックが無く合成データの可能性が高いため、コストを過小評価します。要約 CSV の month 行（synthetic=YES）を確認してください。",
-                     synthetic_months, observed_months);
+      //--- スプレッドが一定であること自体は合成データの証明にならない。
+      //    固定スプレッドを提示する実ティック期間でも min == max は成立する。
+      //    判別材料は値そのもの（合成の既定は 0.20 pips で、実ティック月の
+      //    最小は 0.60 以上）なので、断定せず月別の値を見るよう促す。
+      if(flat_months > 0)
+         PrintFormat("SpreadProbe [注意] %d/%d ヶ月でスプレッドが一定でした（min == max）。合成データの可能性がありますが、固定スプレッドの実ティックでも同じ結果になります。要約 CSV の month 行（flat=YES）で min の値を確認してください。0.20 なら合成、0.60 以上なら実ティックの固定スプレッドです。",
+                     flat_months, observed_months);
 
       //--- 最下位桁の分布
       int distinct_digits = 0;
