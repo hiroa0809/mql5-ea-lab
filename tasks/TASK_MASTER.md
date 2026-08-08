@@ -1,6 +1,6 @@
 # マスタータスクリスト
 
-## 現在地: N4-1 完了。次は N4-2（`Indicators\SuperBollinger.mq5` を描画だけ作り、Matrix Trader と並べて目視）（2026-08-08）
+## 現在地: N4-2 着手中（目視確認待ち）。実装とコンパイルは済み、MT5 に表示して Matrix Trader と並べる工程が残っている（2026-08-08）
 
 > 作業中のブランチ: `feature/n4-superbollinger-calc`。N4-5 まで積んで N4-6 で PR を出す。
 

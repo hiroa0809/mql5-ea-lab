@@ -115,12 +115,19 @@ int OnCalculate(const int rates_total,
    ArraySetAsSeries(BufL3,     true);
    ArraySetAsSeries(BufLag,    true);
 
-   // 最も古い側は計算に必要な本数が揃わないので、そこまでで止める
-   int limit = rates_total - InpPeriod;
+   // 初回は全ての足を走査する。計算に必要な本数が揃わない最も古い側にも
+   // 「描かない印」を入れる必要があり、飛ばすと MT5 側の初期値のまま線が
+   // 引かれてしまう（チャート左端で 0 へ落ちる）。
+   int limit = rates_total - 1;
+
    if(prev_calculated > 0)
-      limit = MathMin(limit, rates_total - prev_calculated + 1);
-   if(limit < 0)
-      return rates_total;
+   {
+      // 遅行線の先端は最新から InpLagBars 本手前にある。足が1本増えるたび
+      // その位置は新しい足へ移るので、更新するのが直近数本だけだと先端が
+      // 二度と計算されず、遅行線だけ伸びなくなる。必ず先端まで含める。
+      limit = MathMax(rates_total - prev_calculated + 1, InpLagBars);
+      limit = MathMin(limit, rates_total - 1);
+   }
 
    for(int i = limit; i >= 0; i--)
    {
