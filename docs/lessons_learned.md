@@ -31,6 +31,13 @@
 - **レート制限の解除後、自動レビューは遡って走らない**。制限中に来た push は `@coderabbitai review` で**手動起動が必要**。待ち時間は制限コメント本文の「Next review available in: N minutes」に明記される。
 - **`gh pr checks` は state だけで判断しない**。レート制限で**レビューが走らなかった場合も `state=SUCCESS` になる**（description が `Review rate limited`）。**description まで確認する**。また `gh pr checks` は PR 単位で最新状態を返すため、新コミットにチェックが無いと**古い成功状態を拾う**。コミット単位の判定は `gh api repos/<owner>/<repo>/commits/<sha>/check-runs` で行う。
 
+## Claude Code の指示ファイル（2026-08-08 に公式ドキュメントで確認）
+
+- **CLAUDE.md は system prompt ではなく、その後に置かれる user message**。厳密な遵守は保証されず、**曖昧な指示や矛盾する指示ほど守られない**。矛盾があると Claude は**どちらかを恣意的に選ぶ**ため、指示を足すときは既存と衝突しないか確認する。出典: [公式](https://docs.claude.com/en/docs/claude-code/memory) の Troubleshoot 節
+- **CLAUDE.md には読み込みの行数制限が無い**（全文が載る）。200行を超えると文脈を食い遵守率が落ちる、という目安のみ。**200行/25KB の打ち切りがあるのは `MEMORY.md` だけ**で、超過分は次回の読み込みで捨てられる
+- **常時要らない指示は `.claude/rules/` へ出し、`paths` で対象ファイルを絞る**（該当ファイルを扱うときだけ読み込まれる）。`@path` インポートは整理にはなるが**起動時に読み込まれるので削減にはならない**
+- 読み込み状況の確認は `/context` の **Memory files**。判別できないときは `InstructionsLoaded` フックで「どのファイルが、いつ、なぜ」読まれたかを記録できる
+
 ## セッション運用
 
 - **セッション区切りごとにブランチを main へ統合する**（`fin` ステップ3.5）。統合せず枝を切り続けると、いつか main から切って先祖返りする。
