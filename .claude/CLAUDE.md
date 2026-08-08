@@ -69,15 +69,7 @@ MT5 同梱の MetaEditor を CLI で呼ぶ。VSCode 拡張は不要。**使用�
   New-Item -ItemType Junction -Path "$mq\Indicators\mql5-ea-lab" -Target "d:\repository\mql5-ea-lab\Indicators"
   ```
 
-### 他ブローカーの MetaEditor（参考）
-
-同じ手順で使えるが、本プロジェクトでは XM を使う。
-
-| ブローカー | データフォルダ ID |
-|---|---|
-| XM Trading MT5 | `C4171FD2B38378D6406D5C84412B5F20` |
-| FXGT MT5 Terminal | `EB299DF3DF8E2F9A1C0723943438596E` |
-| OANDA MetaTrader 5 | `EE0304F13905552AE0B5EAEFB04866EB` |
+他ブローカー（FXGT / OANDA）のデータフォルダ ID は `docs/lessons_learned.md` へ移した。本プロジェクトでは XM しか使わないため。
 
 ### 報告のルール
 
