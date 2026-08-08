@@ -128,10 +128,19 @@ bool SM_LagValue(const double &close[], const int shift, const int lagBars, doub
 //| 固定値を書かない。期間はすべて入力項目なので、書いた瞬間から     |
 //| 入力を変えるたびに嘘になる。末尾の +2 は判定足（shift = 1）と    |
 //| その1本前（遷移の判定に使う）ぶん。                              |
+//|                                                                  |
+//| 転換線の期間も必ず含める。既定値では 9 < 52 なので赤スパンが最大 |
+//| になるが、3つとも入力項目である以上「転換線が一番小さい」は前提  |
+//| にできない。SM_Calc は3つすべての履歴を読むため、外すと足りない  |
+//| 状態で「足りている」と判定してしまう。                           |
 //+------------------------------------------------------------------+
-int SM_RequiredBars(const int kijunPeriod, const int spanBPeriod, const int lagBars, const int slopeBars)
+int SM_RequiredBars(const int tenkanPeriod,
+                    const int kijunPeriod,
+                    const int spanBPeriod,
+                    const int lagBars,
+                    const int slopeBars)
 {
-   return MathMax(kijunPeriod, spanBPeriod) + lagBars + slopeBars + 2;
+   return MathMax(tenkanPeriod, MathMax(kijunPeriod, spanBPeriod)) + lagBars + slopeBars + 2;
 }
 
 #endif // SPANMODEL_MQH
