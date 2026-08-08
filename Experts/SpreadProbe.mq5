@@ -42,6 +42,10 @@ input string InpCsvPrefix         = "n0_spread"; // CSV のファイル名プレ
 #define SPREAD_BUCKETS 1001
 #define HOUR_SLOTS     24
 
+//--- 月別集計の枠。2000年1月〜2049年12月
+#define MONTH_BASE_YEAR 2000
+#define MONTH_SLOTS     600
+
 //--- グローバル
 CTrade  g_trade;
 bool    g_initialized = false;   // OnInit が成功したか（OnDeinit の出力可否に使う）
@@ -57,6 +61,19 @@ long    g_over_count  = 0;        // 1000point を超えたティック数
 long    g_max_spread  = 0;
 long    g_min_spread  = -1;
 long    g_last_digit[10];         // bid の最下位桁の分布（見かけの桁数の検証用）
+
+//--- 方式A（月別）
+//    期間の一部にだけ実ティックが無い場合、全体の distinct_spread_values は
+//    1 にならないため model_check の警告が出ない。そのまま平均すると合成
+//    部分（固定スプレッド）に引きずられてコストを過小評価する。月別に見て
+//    min == max の月を洗い出せば、実ティックの境界がその場で分かる。
+long     g_month_count[MONTH_SLOTS];
+long     g_month_sum[MONTH_SLOTS];
+long     g_month_min[MONTH_SLOTS];
+long     g_month_max[MONTH_SLOTS];
+datetime g_first_tick = 0;
+datetime g_last_tick  = 0;
+string   g_run_stamp  = "";      // 実行ごとに一意。CSV の上書き事故を防ぐ
 
 //--- 方式B
 int      g_bar_count   = 0;
@@ -105,9 +122,16 @@ int OnInit(void)
    g_digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
    g_pip    = (g_digits == 3 || g_digits == 5) ? g_point * 10.0 : g_point;
 
+   //--- CSV 名を作る前に確定させる（trades と summary で同じ値を使う）
+   g_run_stamp = MakeRunStamp();
+
    ArrayInitialize(g_hist, 0);
    ArrayInitialize(g_hour_count, 0);
    ArrayInitialize(g_last_digit, 0);
+   ArrayInitialize(g_month_count, 0);
+   ArrayInitialize(g_month_sum, 0);
+   ArrayInitialize(g_month_min, -1);   // -1 は未観測を表す
+   ArrayInitialize(g_month_max, -1);
 
    g_trade.SetExpertMagicNumber(InpMagic);
    g_trade.SetDeviationInPoints(InpSlippage);
@@ -174,8 +198,9 @@ void SampleSpread(void)
    if(pts < 0)
       return;
 
+   datetime now = TimeCurrent();
    MqlDateTime dt;
-   TimeToStruct(TimeCurrent(), dt);
+   TimeToStruct(now, dt);
    int hour = dt.hour;
    if(hour < 0 || hour >= HOUR_SLOTS)
       return;
@@ -183,10 +208,27 @@ void SampleSpread(void)
    g_tick_total++;
    g_hour_count[hour]++;
 
+   if(g_first_tick == 0)
+      g_first_tick = now;
+   g_last_tick = now;
+
    if(pts > g_max_spread)
       g_max_spread = pts;
    if(g_min_spread < 0 || pts < g_min_spread)
       g_min_spread = pts;
+
+   //--- 月別。クランプ前の実値で集計する
+   int slot = MonthSlot(dt.year, dt.mon);
+   if(slot >= 0)
+     {
+      g_month_count[slot]++;
+      g_month_sum[slot] += pts;
+
+      if(g_month_min[slot] < 0 || pts < g_month_min[slot])
+         g_month_min[slot] = pts;
+      if(pts > g_month_max[slot])
+         g_month_max[slot] = pts;
+     }
 
    //--- 上限超過は最終バケットへ寄せる。分位点が僅かに歪むため
    //    超過件数と最大値を別に持ち、要約で併記する。
@@ -202,6 +244,21 @@ void SampleSpread(void)
    //    pips 換算が 1 桁ずれる。前回の 10 倍誤差はここを見れば防げた。
    long units = (long)MathRound(bid / g_point);
    g_last_digit[(int)(units % 10)]++;
+  }
+
+//+------------------------------------------------------------------+
+//| 年月から月別集計のスロット番号を返す（範囲外は -1）              |
+//+------------------------------------------------------------------+
+int MonthSlot(const int year, const int mon)
+  {
+   if(mon < 1 || mon > 12)
+      return(-1);
+
+   int slot = (year - MONTH_BASE_YEAR) * 12 + (mon - 1);
+   if(slot < 0 || slot >= MONTH_SLOTS)
+      return(-1);
+
+   return(slot);
   }
 
 //+------------------------------------------------------------------+
@@ -422,15 +479,60 @@ bool IsNewBar(void)
 //+------------------------------------------------------------------+
 //| CSV のファイル名を作る                                           |
 //|                                                                  |
-//| 銘柄と時間足を名前に入れる。M5 と M15 の両方を測る計画のため     |
-//| （docs/trading_rules.md §2.2）、固定名だと2回目の実行が1回目を   |
-//| 消す。実行時刻は入れない。区別が要るのは測定条件の違いであって   |
-//| 実行回数ではなく、同条件の再実行は上書きされるほうが探しやすい。 |
+//| 銘柄・時間足に加えて実行時刻を入れる。同じ銘柄・時間足で期間や   |
+//| 遅延設定を変えて測り直すことが実際に頻発し、固定名では前の結果が |
+//| 黙って消える（2026-08-07 に2度発生）。入力パラメータを毎回変える |
+//| 運用に頼らず、既定で安全側にする。                               |
+//|                                                                  |
+//| 測定条件そのものは要約 CSV の first_tick / last_tick に入るため、|
+//| ファイル名で期間を表す必要はない。                               |
 //+------------------------------------------------------------------+
+string CsvNameFor(const string stamp, const string kind)
+  {
+   return(StringFormat("%s_%s_%s_%s_%s.csv", InpCsvPrefix, _Symbol,
+                       EnumToString((ENUM_TIMEFRAMES)_Period), stamp, kind));
+  }
+
 string CsvName(const string kind)
   {
-   return(StringFormat("%s_%s_%s_%s.csv", InpCsvPrefix, _Symbol,
-                       EnumToString((ENUM_TIMEFRAMES)_Period), kind));
+   return(CsvNameFor(g_run_stamp, kind));
+  }
+
+//+------------------------------------------------------------------+
+//| 実行ごとに一意な文字列を作る                                     |
+//|                                                                  |
+//| テスター内では TimeLocal() が**シミュレーション時刻**を返すため、 |
+//| ここで得られるのはテスト開始日になる。期間の識別には都合が良い    |
+//| 一方、同じ期間で遅延設定だけ変えて測り直すと衝突して前の結果が    |
+//| 消える（2026-08-07 に実際に発生）。                              |
+//|                                                                  |
+//| GetTickCount() を足しただけでは足りない。同関数は OS 起動からの   |
+//| ミリ秒で、% 1000000 は約16分40秒で一周するため、再実行の間隔次第  |
+//| で同じ値になり得る。FILE_WRITE は既存ファイルを即座に空にする     |
+//| ので、衝突すると前回の測定結果が失われる。                       |
+//| 最終的な一意性は FileIsExist による実在確認で担保する。           |
+//+------------------------------------------------------------------+
+string MakeRunStamp(void)
+  {
+   string s = TimeToString(TimeLocal(), TIME_DATE | TIME_MINUTES);
+   StringReplace(s, ".", "");
+   StringReplace(s, ":", "");
+   StringReplace(s, " ", "_");
+
+   string base = StringFormat("%s_%06u", s, (uint)(GetTickCount() % 1000000));
+
+//--- trades / summary の**両方**が空いている名前になるまで連番を足す
+   string cand = base;
+   for(int seq = 1; seq <= 999; seq++)
+     {
+      if(!FileIsExist(CsvNameFor(cand, "trades"),  FILE_COMMON)
+         && !FileIsExist(CsvNameFor(cand, "summary"), FILE_COMMON))
+         return(cand);
+
+      cand = StringFormat("%s_%03d", base, seq);
+     }
+
+   return(cand);
   }
 
 //+------------------------------------------------------------------+
@@ -540,6 +642,15 @@ void WriteSummary(void)
    WriteRow(fh, "section", "digits", (string)g_digits, "", "", "", "");
    WriteRow(fh, "section", "pips_in_points", DoubleToString(pip_pts, 0), "", "", "", "");
 
+   //--- 観測した実データの範囲。後からファイルを見て計測期間が分かるようにする
+   //    （テスターの指定期間ではなく、実際にティックが来た範囲）
+   WriteRow(fh, "section", "first_tick",
+            (g_first_tick == 0) ? "none" : TimeToString(g_first_tick, TIME_DATE | TIME_MINUTES),
+            "", "", "", "");
+   WriteRow(fh, "section", "last_tick",
+            (g_last_tick == 0) ? "none" : TimeToString(g_last_tick, TIME_DATE | TIME_MINUTES),
+            "", "", "", "");
+
    //--- 方式A
    if(InpSampleTicks && g_tick_total > 0)
      {
@@ -572,6 +683,45 @@ void WriteSummary(void)
                   DoubleToString(Percentile(h, 0.90) / pip_pts, 2),
                   DoubleToString(Percentile(h, 0.99) / pip_pts, 2), "");
         }
+
+      //--- 月別。min == max の月は実ティックが無く合成データで埋められている。
+      //    一部の月だけ合成でも全体の distinct_spread_values は 1 にならず
+      //    警告が出ないため、境界はここで特定する。
+      WriteRow(fh, "month", "month", "count", "mean_pips", "min_pips", "max_pips", "flat");
+      int flat_months     = 0;
+      int observed_months = 0;
+
+      for(int s = 0; s < MONTH_SLOTS; s++)
+        {
+         if(g_month_count[s] <= 0)
+            continue;
+
+         observed_months++;
+
+         double mean = (double)g_month_sum[s] / (double)g_month_count[s];
+         bool   flat = (g_month_min[s] == g_month_max[s]);
+         if(flat)
+            flat_months++;
+
+         WriteRow(fh, "month",
+                  StringFormat("%04d-%02d", MONTH_BASE_YEAR + s / 12, (s % 12) + 1),
+                  (string)g_month_count[s],
+                  DoubleToString(mean / pip_pts, 2),
+                  DoubleToString(g_month_min[s] / pip_pts, 2),
+                  DoubleToString(g_month_max[s] / pip_pts, 2),
+                  flat ? "YES" : "");
+        }
+
+      WriteRow(fh, "month_check", "observed_months", (string)observed_months, "", "", "", "");
+      WriteRow(fh, "month_check", "flat_months",     (string)flat_months,     "", "", "", "");
+
+      //--- スプレッドが一定であること自体は合成データの証明にならない。
+      //    固定スプレッドを提示する実ティック期間でも min == max は成立する。
+      //    判別材料は値そのもの（合成の既定は 0.20 pips で、実ティック月の
+      //    最小は 0.60 以上）なので、断定せず月別の値を見るよう促す。
+      if(flat_months > 0)
+         PrintFormat("SpreadProbe [注意] %d/%d ヶ月でスプレッドが一定でした（min == max）。合成データの可能性がありますが、固定スプレッドの実ティックでも同じ結果になります。要約 CSV の month 行（flat=YES）で min の値を確認してください。0.20 なら合成、0.60 以上なら実ティックの固定スプレッドです。",
+                     flat_months, observed_months);
 
       //--- 最下位桁の分布
       int distinct_digits = 0;
