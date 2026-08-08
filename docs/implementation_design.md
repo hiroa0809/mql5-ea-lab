@@ -39,10 +39,12 @@ Experts\
 
 ```text
 ルール1: InpR1_Period + InpR1_LagBars + max(InpR1_SqueezeBars, InpR1_ExpandBars) + 2
-ルール2: max(InpR2_Kijun, InpR2_SpanB) + InpR2_LagBars + InpR2_SlopeBars + 2
+ルール2: max(InpR2_Tenkan, InpR2_Kijun, InpR2_SpanB) + InpR2_LagBars + InpR2_SlopeBars + 2
 ```
 
 既定値では ルール1 = 65、ルール2 = 85。末尾の `+2` は判定足（`shift = 1`）と遷移判定に使う1本前ぶん。
+
+> **ルール2に `InpR2_Tenkan` を含める**（2026-08-08・PR #10 のレビュー）。当初 `max(InpR2_Kijun, InpR2_SpanB)` と書いていたが、転換線の期間も計算に使う以上、外すと転換線を一番大きくしたときに不足を検出できない。既定値（9 < 52）では結果は変わらない。
 
 ## 2. 入力パラメータ
 
