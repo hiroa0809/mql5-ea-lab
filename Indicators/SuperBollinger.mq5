@@ -49,12 +49,12 @@
 #property indicator_label9  "買いサイン"
 #property indicator_type9   DRAW_ARROW
 #property indicator_color9  clrYellow
-#property indicator_width9  2
+#property indicator_width9  4
 
 #property indicator_label10 "売りサイン"
 #property indicator_type10  DRAW_ARROW
 #property indicator_color10 clrOrangeRed
-#property indicator_width10 2
+#property indicator_width10 4
 
 // 以下は線を引かない。データウィンドウで足ごとに条件の成否を読むためだけの枠。
 // どの条件で止まったのかを、チャートを見ながらその場で切り分けられる。
