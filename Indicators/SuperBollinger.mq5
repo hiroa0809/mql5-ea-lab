@@ -5,13 +5,17 @@
 //| 計算も判定も Include\Signals\SuperBollinger.mqh に置き、EA と    |
 //| 共有する。本ファイルは描画だけを担当し、式も条件も持たない。     |
 //|                                                                  |
+//| 矢印は「条件が揃った足」ではなく「実際に建てる足」に出す。建玉を |
+//| 1つに限る決まりを本ファイル側でも追っているため。ここで模しているの|
+//| は 建玉1つ・X1 での手仕舞い までで、損切りと時間切れは EA が持つ。|
+//|                                                                  |
 //| 確認の相手は Matrix Trader（ドル円5分足）。                      |
 //| 計算定義は docs/indicator_spec.md §2.2、                         |
 //| 売買条件は docs/trading_rules.md §4.1。                          |
 //+------------------------------------------------------------------+
 #property indicator_chart_window
-#property indicator_buffers 15
-#property indicator_plots   15
+#property indicator_buffers 17
+#property indicator_plots   16
 
 #property indicator_label1  "センターライン"
 #property indicator_type1   DRAW_LINE
@@ -69,6 +73,11 @@
 #property indicator_label15 "遅行スパンの位置 (σ)"
 #property indicator_type15  DRAW_NONE
 
+#property indicator_label16 "決済サイン"
+#property indicator_type16  DRAW_ARROW
+#property indicator_color16 clrWhite
+#property indicator_width16 3
+
 #include <Signals\SuperBollinger.mqh>
 
 input int    InpPeriod      = 21;    // 期間（センターラインとσ）
@@ -83,6 +92,8 @@ input int    InpExpandBars  = 3;     // ④拡大を見る本数
 double BufCenter[], BufU1[], BufL1[], BufU2[], BufL2[], BufU3[], BufL3[], BufLag[];
 double BufBuy[], BufSell[];
 double BufC1[], BufC2[], BufC3[], BufC4[], BufLagZ[];
+double BufExit[];
+double BufPos[];   // 各足を処理し終えた時点の建玉（+1 買い / −1 売り / 0 無し）
 
 SBRule1Params g_rule1;
 
@@ -139,8 +150,10 @@ int OnInit()
    SetIndexBuffer(12, BufC3,    INDICATOR_DATA);
    SetIndexBuffer(13, BufC4,    INDICATOR_DATA);
    SetIndexBuffer(14, BufLagZ,  INDICATOR_DATA);
+   SetIndexBuffer(15, BufExit,  INDICATOR_DATA);
+   SetIndexBuffer(16, BufPos,   INDICATOR_CALCULATIONS);
 
-   for(int p = 0; p < 15; p++)
+   for(int p = 0; p < 16; p++)
       PlotIndexSetDouble(p, PLOT_EMPTY_VALUE, EMPTY_VALUE);
 
    // 矢印は足の外側へ逃がす。安値・高値そのものに描くとローソク足に
@@ -149,6 +162,7 @@ int OnInit()
    PlotIndexSetInteger(8, PLOT_ARROW_SHIFT, 12);
    PlotIndexSetInteger(9, PLOT_ARROW, 234);   // ↓
    PlotIndexSetInteger(9, PLOT_ARROW_SHIFT, -12);
+   PlotIndexSetInteger(15, PLOT_ARROW, 251);  // ✗ 決済した終値の位置に置く
 
    IndicatorSetInteger(INDICATOR_DIGITS, _Digits);
    IndicatorSetString(INDICATOR_SHORTNAME,
@@ -194,6 +208,8 @@ int OnCalculate(const int rates_total,
    ArraySetAsSeries(BufC3,     true);
    ArraySetAsSeries(BufC4,     true);
    ArraySetAsSeries(BufLagZ,   true);
+   ArraySetAsSeries(BufExit,   true);
+   ArraySetAsSeries(BufPos,    true);
 
    // 初回は全ての足を走査する。計算に必要な本数が揃わない最も古い側にも
    // 「描かない印」を入れる必要があり、飛ばすと MT5 側の初期値のまま線が
@@ -208,6 +224,14 @@ int OnCalculate(const int rates_total,
       limit = MathMax(rates_total - prev_calculated + 1, InpLagBars);
       limit = MathMin(limit, rates_total - 1);
    }
+
+   // 建玉の有無を追う。決済条件は7割以上の足で真になるので、保有中かどうか
+   // を知らないと決済アイコンの意味が無い。ループは添字の大きい側（古い足）
+   // から回るので、そのまま時系列順に建玉を持ち越せる。差分更新のときは1本
+   // 古い足の状態を引き継ぐ（前回の計算で BufPos に残っている）。
+   int pos = 0;
+   if(limit + 1 <= rates_total - 1)
+      pos = (int)BufPos[limit + 1];
 
    for(int i = limit; i >= 0; i--)
    {
@@ -242,6 +266,7 @@ int OnCalculate(const int rates_total,
       // に出すと足の途中で現れたり消えたりする値を EA の発火と見比べてしまう。
       BufBuy[i]  = EMPTY_VALUE;
       BufSell[i] = EMPTY_VALUE;
+      BufExit[i] = EMPTY_VALUE;
       BufC1[i]   = EMPTY_VALUE;
       BufC2[i]   = EMPTY_VALUE;
       BufC3[i]   = EMPTY_VALUE;
@@ -250,11 +275,9 @@ int OnCalculate(const int rates_total,
       if(i >= 1)
       {
          SBRule1Signal s;
-         if(SB_Rule1(close, high, low, i, g_rule1, s))
+         const bool haveSignal = SB_Rule1(close, high, low, i, g_rule1, s);
+         if(haveSignal)
          {
-            if(s.buy)  BufBuy[i]  = low[i];
-            if(s.sell) BufSell[i] = high[i];
-
             BufC1[i] = s.squeezed  ? 1.0 : 0.0;
             BufC2[i] = s.lagAbove  ? 1.0 : (s.lagBelow  ? -1.0 : 0.0);
             BufC3[i] = s.crossUp   ? 1.0 : (s.crossDown ? -1.0 : 0.0);
@@ -263,7 +286,27 @@ int OnCalculate(const int rates_total,
          double z;
          if(SB_LagOffset(close, i, InpLagBars, InpPeriod, z))
             BufLagZ[i] = z;
+
+         // 手仕舞いが先。同じ足で決済と反対のサインが揃えばドテンになる
+         if(pos != 0)
+         {
+            bool doExit;
+            if(SB_Rule1Exit(close, i, InpPeriod, pos > 0, doExit) && doExit)
+            {
+               BufExit[i] = close[i];
+               pos = 0;
+            }
+         }
+
+         // 建玉は1つまで。保有中に出た同じ向きのサインは矢印を出さない
+         // （EA も無視するため。条件が揃ったかどうかは上の①②③④で読む）
+         if(pos == 0 && haveSignal)
+         {
+            if(s.buy)  { BufBuy[i]  = low[i];  pos =  1; }
+            if(s.sell) { BufSell[i] = high[i]; pos = -1; }
+         }
       }
+      BufPos[i] = pos;
    }
 
    return rates_total;

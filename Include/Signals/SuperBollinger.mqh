@@ -266,4 +266,24 @@ bool SB_Rule1(const double &close[], const double &high[], const double &low[],
    return true;
 }
 
+//+------------------------------------------------------------------+
+//| ルール1の手仕舞い（X1）— 終値が 1σ の内側へ戻ったか              |
+//|                                                                  |
+//| 資料 p13「調整の反落局面へ入るサイン」。エントリー側（③）が遷移 |
+//| なのに対し、こちらは**状態**として扱う。保有中に毎足チェックする |
+//| 条件なので、遷移として書くと取り逃したとき決済されないまま走り   |
+//| 続ける。docs/trading_rules.md §3.3b・§4.2                        |
+//|                                                                  |
+//| p13 は「バンド幅が収束傾向」「遅行スパンが絡む」も併記している   |
+//| が、3つ揃うのを待つと調整が進んだ後の決済になるため使わない。    |
+//+------------------------------------------------------------------+
+bool SB_Rule1Exit(const double &close[], const int shift, const int period,
+                  const bool isLong, bool &out)
+{
+   SBValues v;
+   if(!SB_Calc(close, shift, period, v)) return false;
+   out = isLong ? (close[shift] < v.upper1) : (close[shift] > v.lower1);
+   return true;
+}
+
 #endif // SUPERBOLLINGER_MQH
