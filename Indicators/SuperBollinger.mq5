@@ -10,8 +10,8 @@
 //| 売買条件は docs/trading_rules.md §4.1。                          |
 //+------------------------------------------------------------------+
 #property indicator_chart_window
-#property indicator_buffers 10
-#property indicator_plots   10
+#property indicator_buffers 15
+#property indicator_plots   15
 
 #property indicator_label1  "センターライン"
 #property indicator_type1   DRAW_LINE
@@ -56,6 +56,19 @@
 #property indicator_color10 clrOrangeRed
 #property indicator_width10 2
 
+// 以下は線を引かない。データウィンドウで足ごとに条件の成否を読むためだけの枠。
+// どの条件で止まったのかを、チャートを見ながらその場で切り分けられる。
+#property indicator_label11 "①膠着 (1=成立)"
+#property indicator_type11  DRAW_NONE
+#property indicator_label12 "②遅行線 (1=陽転 -1=陰転 0=絡む)"
+#property indicator_type12  DRAW_NONE
+#property indicator_label13 "③突破 (1=上抜け -1=下抜け)"
+#property indicator_type13  DRAW_NONE
+#property indicator_label14 "④拡大 (1=成立)"
+#property indicator_type14  DRAW_NONE
+#property indicator_label15 "遅行スパンの位置 (σ)"
+#property indicator_type15  DRAW_NONE
+
 #include <Signals\SuperBollinger.mqh>
 
 input int    InpPeriod      = 21;    // 期間（センターラインとσ）
@@ -69,6 +82,7 @@ input int    InpExpandBars  = 3;     // ④拡大を見る本数
 
 double BufCenter[], BufU1[], BufL1[], BufU2[], BufL2[], BufU3[], BufL3[], BufLag[];
 double BufBuy[], BufSell[];
+double BufC1[], BufC2[], BufC3[], BufC4[], BufLagZ[];
 
 SBRule1Params g_rule1;
 
@@ -120,8 +134,13 @@ int OnInit()
    SetIndexBuffer(7, BufLag,    INDICATOR_DATA);
    SetIndexBuffer(8, BufBuy,    INDICATOR_DATA);
    SetIndexBuffer(9, BufSell,   INDICATOR_DATA);
+   SetIndexBuffer(10, BufC1,    INDICATOR_DATA);
+   SetIndexBuffer(11, BufC2,    INDICATOR_DATA);
+   SetIndexBuffer(12, BufC3,    INDICATOR_DATA);
+   SetIndexBuffer(13, BufC4,    INDICATOR_DATA);
+   SetIndexBuffer(14, BufLagZ,  INDICATOR_DATA);
 
-   for(int p = 0; p < 10; p++)
+   for(int p = 0; p < 15; p++)
       PlotIndexSetDouble(p, PLOT_EMPTY_VALUE, EMPTY_VALUE);
 
    // 矢印は足の外側へ逃がす。安値・高値そのものに描くとローソク足に
@@ -170,6 +189,11 @@ int OnCalculate(const int rates_total,
    ArraySetAsSeries(BufLag,    true);
    ArraySetAsSeries(BufBuy,    true);
    ArraySetAsSeries(BufSell,   true);
+   ArraySetAsSeries(BufC1,     true);
+   ArraySetAsSeries(BufC2,     true);
+   ArraySetAsSeries(BufC3,     true);
+   ArraySetAsSeries(BufC4,     true);
+   ArraySetAsSeries(BufLagZ,   true);
 
    // 初回は全ての足を走査する。計算に必要な本数が揃わない最も古い側にも
    // 「描かない印」を入れる必要があり、飛ばすと MT5 側の初期値のまま線が
@@ -213,11 +237,16 @@ int OnCalculate(const int rates_total,
       double lag;
       BufLag[i] = SB_LagValue(close, i, InpLagBars, lag) ? lag : EMPTY_VALUE;
 
-      // 売買サイン。形成中の足（添字 0）には出さない。判定は確定足のみ
-      // という決まりのため（docs/trading_rules.md §2.1）で、ここに出すと
-      // 足の途中で現れたり消えたりする矢印を EA の発火と見比べてしまう。
+      // 売買サインと条件の内訳。形成中の足（添字 0）には出さない。判定は
+      // 確定足のみという決まりのため（docs/trading_rules.md §2.1）で、ここ
+      // に出すと足の途中で現れたり消えたりする値を EA の発火と見比べてしまう。
       BufBuy[i]  = EMPTY_VALUE;
       BufSell[i] = EMPTY_VALUE;
+      BufC1[i]   = EMPTY_VALUE;
+      BufC2[i]   = EMPTY_VALUE;
+      BufC3[i]   = EMPTY_VALUE;
+      BufC4[i]   = EMPTY_VALUE;
+      BufLagZ[i] = EMPTY_VALUE;
       if(i >= 1)
       {
          SBRule1Signal s;
@@ -225,7 +254,15 @@ int OnCalculate(const int rates_total,
          {
             if(s.buy)  BufBuy[i]  = low[i];
             if(s.sell) BufSell[i] = high[i];
+
+            BufC1[i] = s.squeezed  ? 1.0 : 0.0;
+            BufC2[i] = s.lagAbove  ? 1.0 : (s.lagBelow  ? -1.0 : 0.0);
+            BufC3[i] = s.crossUp   ? 1.0 : (s.crossDown ? -1.0 : 0.0);
+            BufC4[i] = s.expanding ? 1.0 : 0.0;
          }
+         double z;
+         if(SB_LagOffset(close, i, InpLagBars, InpPeriod, z))
+            BufLagZ[i] = z;
       }
    }
 
