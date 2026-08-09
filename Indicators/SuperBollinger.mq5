@@ -96,6 +96,7 @@ input double InpSigmaMult   = 3.0;   // ①③で使うσの倍数
 input bool   InpUseLag      = true;  // ②遅行線の陽転/陰転を条件に入れる
 input bool   InpUseExpand   = true;  // ④バンド幅の拡大を条件に入れる
 input int    InpExpandBars  = 3;     // ④拡大を見る本数
+input ENUM_SB_EXIT InpExit  = SB_EXIT_CLOSE_SIGMA1;  // 決済の方式
 
 double BufCenter[], BufU1[], BufL1[], BufU2[], BufL2[], BufU3[], BufL3[], BufLag[];
 double BufBuy[], BufSell[];
@@ -307,7 +308,7 @@ int OnCalculate(const int rates_total,
          {
             const bool wasLong = (pos > 0);
             bool doExit;
-            if(SB_Rule1Exit(close, i, InpPeriod, wasLong, doExit) && doExit)
+            if(SB_Rule1Exit(close, i, InpPeriod, InpLagBars, InpExit, wasLong, doExit) && doExit)
             {
                if(wasLong) BufExitBuy[i]  = low[i];
                else        BufExitSell[i] = high[i];

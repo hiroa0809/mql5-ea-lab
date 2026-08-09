@@ -267,22 +267,57 @@ bool SB_Rule1(const double &close[], const double &high[], const double &low[],
 }
 
 //+------------------------------------------------------------------+
-//| ルール1の手仕舞い（X1）— 終値が 1σ の内側へ戻ったか              |
+//| ルール1の手仕舞い方式                                            |
 //|                                                                  |
-//| 資料 p13「調整の反落局面へ入るサイン」。エントリー側（③）が遷移 |
-//| なのに対し、こちらは**状態**として扱う。保有中に毎足チェックする |
-//| 条件なので、遷移として書くと取り逃したとき決済されないまま走り   |
-//| 続ける。docs/trading_rules.md §3.3b・§4.2                        |
+//| A は資料 p13 のとおり。B と C は【一意化】で、エントリーと同じ   |
+//| 物差し（遅行スパンと帯の距離）を使う。                           |
 //|                                                                  |
-//| p13 は「バンド幅が収束傾向」「遅行スパンが絡む」も併記している   |
-//| が、3つ揃うのを待つと調整が進んだ後の決済になるため使わない。    |
+//| A を分けてある理由: エントリーは④で「バンド幅が拡大している」   |
+//| ことを要求するので、発火を起こした値動きがそのまま今のσを膨らま |
+//| せる。A は「今の帯」を基準にするため、**エントリーの勢いが強い   |
+//| ほど決済のハードルが下がる**。B・C にはこの反応が無い。          |
+//|                                                                  |
+//| どれが良いかは学習期間の平均グロス損益で決める（回数制限なし）。 |
+//+------------------------------------------------------------------+
+enum ENUM_SB_EXIT
+{
+   SB_EXIT_CLOSE_SIGMA1 = 0,   // A 終値が 1σ の内側へ戻る（資料 p13）
+   SB_EXIT_LAG_SIGMA1   = 1,   // B 遅行スパンが 1σ の内側へ戻る
+   SB_EXIT_LAG_FLIP     = 2    // C 遅行スパンが反対側へ陰転する
+};
+
+//+------------------------------------------------------------------+
+//| ルール1の手仕舞い — 抜けるべき足かどうか                         |
+//|                                                                  |
+//| エントリー側（③）が遷移なのに対し、こちらは**状態**として扱う。 |
+//| 保有中に毎足チェックする条件なので、遷移として書くと取り逃した   |
+//| とき決済されないまま走り続ける。docs/trading_rules.md §3.3b・§4.2|
+//|                                                                  |
+//| A について: p13 は「バンド幅が収束傾向」「遅行スパンが絡む」も   |
+//| 併記しているが、3つ揃うのを待つと調整が進んだ後の決済になる。    |
+//|                                                                  |
+//| B の 1σ は固定。つまみにすると学習期間の成績が実力以上に出る。   |
 //+------------------------------------------------------------------+
 bool SB_Rule1Exit(const double &close[], const int shift, const int period,
+                  const int lagBars, const ENUM_SB_EXIT method,
                   const bool isLong, bool &out)
 {
-   SBValues v;
-   if(!SB_Calc(close, shift, period, v)) return false;
-   out = isLong ? (close[shift] < v.upper1) : (close[shift] > v.lower1);
+   if(method == SB_EXIT_CLOSE_SIGMA1)
+   {
+      SBValues v;
+      if(!SB_Calc(close, shift, period, v)) return false;
+      out = isLong ? (close[shift] < v.upper1) : (close[shift] > v.lower1);
+      return true;
+   }
+
+   double z;
+   if(!SB_LagOffset(close, shift, lagBars, period, z)) return false;
+
+   if(method == SB_EXIT_LAG_SIGMA1)
+      out = isLong ? (z <= 1.0) : (z >= -1.0);
+   else
+      out = isLong ? (z < 0.0) : (z > 0.0);
+
    return true;
 }
 
