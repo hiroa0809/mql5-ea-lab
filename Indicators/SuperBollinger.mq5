@@ -1,17 +1,17 @@
 //+------------------------------------------------------------------+
 //| SuperBollinger.mq5                                               |
-//| スーパーボリンジャーの描画（N4-2 の目視確認用）                  |
+//| スーパーボリンジャーの描画とルール1のサイン表示（目視確認用）    |
 //|                                                                  |
-//| 計算は Include\Signals\SuperBollinger.mqh に置き、EA と共有する。|
-//| 本ファイルは描画だけを担当し、計算式を持たない。売買判定の矢印は |
-//| N5-1 で追加する。                                                |
+//| 計算も判定も Include\Signals\SuperBollinger.mqh に置き、EA と    |
+//| 共有する。本ファイルは描画だけを担当し、式も条件も持たない。     |
 //|                                                                  |
 //| 確認の相手は Matrix Trader（ドル円5分足）。                      |
-//| 計算定義は docs/indicator_spec.md §2.2。                         |
+//| 計算定義は docs/indicator_spec.md §2.2、                         |
+//| 売買条件は docs/trading_rules.md §4.1。                          |
 //+------------------------------------------------------------------+
 #property indicator_chart_window
-#property indicator_buffers 8
-#property indicator_plots   8
+#property indicator_buffers 10
+#property indicator_plots   10
 
 #property indicator_label1  "センターライン"
 #property indicator_type1   DRAW_LINE
@@ -46,12 +46,30 @@
 #property indicator_type8   DRAW_LINE
 #property indicator_color8  clrMagenta
 
+#property indicator_label9  "買いサイン"
+#property indicator_type9   DRAW_ARROW
+#property indicator_color9  clrYellow
+#property indicator_width9  2
+
+#property indicator_label10 "売りサイン"
+#property indicator_type10  DRAW_ARROW
+#property indicator_color10 clrOrangeRed
+#property indicator_width10 2
+
 #include <Signals\SuperBollinger.mqh>
 
-input int InpPeriod  = 21;  // 期間（センターラインとσ）
-input int InpLagBars = 21;  // 遅行線の本数
+input int  InpPeriod      = 21;    // 期間（センターラインとσ）
+input int  InpLagBars     = 21;    // 遅行線の本数
+input bool InpUseSqueeze  = true;  // ①膠着を条件に入れる
+input int  InpSqueezeBars = 21;    // ①膠着とみなす本数（この本数ぶん ±1σ 内）
+input bool InpUseLag      = true;  // ②遅行線の陽転/陰転を条件に入れる
+input bool InpUseExpand   = true;  // ④バンド幅の拡大を条件に入れる
+input int  InpExpandBars  = 3;     // ④拡大を見る本数
 
 double BufCenter[], BufU1[], BufL1[], BufU2[], BufL2[], BufU3[], BufL3[], BufLag[];
+double BufBuy[], BufSell[];
+
+SBRule1Params g_rule1;
 
 //+------------------------------------------------------------------+
 int OnInit()
@@ -66,6 +84,24 @@ int OnInit()
       Print("遅行線の本数は 1 以上にしてください");
       return INIT_PARAMETERS_INCORRECT;
    }
+   if(InpSqueezeBars < 1)
+   {
+      Print("①膠着とみなす本数は 1 以上にしてください");
+      return INIT_PARAMETERS_INCORRECT;
+   }
+   if(InpExpandBars < 1)
+   {
+      Print("④拡大を見る本数は 1 以上にしてください（0 では常に不成立になる）");
+      return INIT_PARAMETERS_INCORRECT;
+   }
+
+   g_rule1.period      = InpPeriod;
+   g_rule1.lagBars     = InpLagBars;
+   g_rule1.useSqueeze  = InpUseSqueeze;
+   g_rule1.squeezeBars = InpSqueezeBars;
+   g_rule1.useLag      = InpUseLag;
+   g_rule1.useExpand   = InpUseExpand;
+   g_rule1.expandBars  = InpExpandBars;
 
    SetIndexBuffer(0, BufCenter, INDICATOR_DATA);
    SetIndexBuffer(1, BufU1,     INDICATOR_DATA);
@@ -75,9 +111,18 @@ int OnInit()
    SetIndexBuffer(5, BufU3,     INDICATOR_DATA);
    SetIndexBuffer(6, BufL3,     INDICATOR_DATA);
    SetIndexBuffer(7, BufLag,    INDICATOR_DATA);
+   SetIndexBuffer(8, BufBuy,    INDICATOR_DATA);
+   SetIndexBuffer(9, BufSell,   INDICATOR_DATA);
 
-   for(int p = 0; p < 8; p++)
+   for(int p = 0; p < 10; p++)
       PlotIndexSetDouble(p, PLOT_EMPTY_VALUE, EMPTY_VALUE);
+
+   // 矢印は足の外側へ逃がす。安値・高値そのものに描くとローソク足に
+   // 重なって発火位置が読めない（負のシフトが上、正が下・単位はピクセル）
+   PlotIndexSetInteger(8, PLOT_ARROW, 233);   // ↑
+   PlotIndexSetInteger(8, PLOT_ARROW_SHIFT, 12);
+   PlotIndexSetInteger(9, PLOT_ARROW, 234);   // ↓
+   PlotIndexSetInteger(9, PLOT_ARROW_SHIFT, -12);
 
    IndicatorSetInteger(INDICATOR_DIGITS, _Digits);
    IndicatorSetString(INDICATOR_SHORTNAME,
@@ -106,6 +151,8 @@ int OnCalculate(const int rates_total,
       return 0;
 
    ArraySetAsSeries(close,     true);
+   ArraySetAsSeries(high,      true);
+   ArraySetAsSeries(low,       true);
    ArraySetAsSeries(BufCenter, true);
    ArraySetAsSeries(BufU1,     true);
    ArraySetAsSeries(BufL1,     true);
@@ -114,6 +161,8 @@ int OnCalculate(const int rates_total,
    ArraySetAsSeries(BufU3,     true);
    ArraySetAsSeries(BufL3,     true);
    ArraySetAsSeries(BufLag,    true);
+   ArraySetAsSeries(BufBuy,    true);
+   ArraySetAsSeries(BufSell,   true);
 
    // 初回は全ての足を走査する。計算に必要な本数が揃わない最も古い側にも
    // 「描かない印」を入れる必要があり、飛ばすと MT5 側の初期値のまま線が
@@ -156,6 +205,21 @@ int OnCalculate(const int rates_total,
       // 最新から InpLagBars 本ぶんは値が無い。ここで線が切れるのが正しい
       double lag;
       BufLag[i] = SB_LagValue(close, i, InpLagBars, lag) ? lag : EMPTY_VALUE;
+
+      // 売買サイン。形成中の足（添字 0）には出さない。判定は確定足のみ
+      // という決まりのため（docs/trading_rules.md §2.1）で、ここに出すと
+      // 足の途中で現れたり消えたりする矢印を EA の発火と見比べてしまう。
+      BufBuy[i]  = EMPTY_VALUE;
+      BufSell[i] = EMPTY_VALUE;
+      if(i >= 1)
+      {
+         SBRule1Signal s;
+         if(SB_Rule1(close, high, low, i, g_rule1, s))
+         {
+            if(s.buy)  BufBuy[i]  = low[i];
+            if(s.sell) BufSell[i] = high[i];
+         }
+      }
    }
 
    return rates_total;
