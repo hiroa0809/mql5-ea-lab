@@ -129,8 +129,8 @@ int SB_RequiredBars(const int period, const int lagBars, const int squeezeBars, 
 //| ルール1（トレンド開始）の入力                                    |
 //|                                                                  |
 //| インジケーターと EA が同じ判定を使うため、条件の ON/OFF まで含め |
-//| てここへ集める。③（±1σ の突破）だけ ON/OFF が無いのは、これが  |
-//| 引き金であり外すとルールが成立しないため。                       |
+//| てここへ集める。③（遅行スパンの帯突破）だけ ON/OFF が無いのは、 |
+//| これが引き金であり外すとルールが成立しないため。                 |
 //| 出典: docs/implementation_design.md §2                           |
 //+------------------------------------------------------------------+
 struct SBRule1Params
@@ -213,7 +213,7 @@ bool SB_Rule1(const double &close[], const double &high[], const double &low[],
    // ① 膠着 — 遅行スパンが直前 squeezeBars 本ぶん ±sigmaMult σ の内側に
    // とどまっていた。「21本かけて価格が正味どこへも行っていない」状態を
    // 見ており、帯が細いかどうかは見ていない。判定足そのものは含めない
-   // （p11-① は「直前が」膠着）。docs/trading_rules.md §3.2
+   // （p11-① は「直前が」膠着）。docs/trading_rules.md §3.3
    out.squeezed = true;
    for(int j = shift + 1; j <= shift + p.squeezeBars; j++)
    {
