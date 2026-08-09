@@ -58,13 +58,14 @@
 
 #include <Signals\SuperBollinger.mqh>
 
-input int  InpPeriod      = 21;    // 期間（センターラインとσ）
-input int  InpLagBars     = 21;    // 遅行線の本数
-input bool InpUseSqueeze  = true;  // ①膠着を条件に入れる
-input int  InpSqueezeBars = 21;    // ①膠着とみなす本数（この本数ぶん ±1σ 内）
-input bool InpUseLag      = true;  // ②遅行線の陽転/陰転を条件に入れる
-input bool InpUseExpand   = true;  // ④バンド幅の拡大を条件に入れる
-input int  InpExpandBars  = 3;     // ④拡大を見る本数
+input int    InpPeriod      = 21;    // 期間（センターラインとσ）
+input int    InpLagBars     = 21;    // 遅行線の本数
+input bool   InpUseSqueeze  = true;  // ①膠着を条件に入れる
+input int    InpSqueezeBars = 21;    // ①膠着とみなす本数（この本数ぶん帯の内側）
+input double InpSigmaMult   = 3.0;   // ①③で使うσの倍数
+input bool   InpUseLag      = true;  // ②遅行線の陽転/陰転を条件に入れる
+input bool   InpUseExpand   = true;  // ④バンド幅の拡大を条件に入れる
+input int    InpExpandBars  = 3;     // ④拡大を見る本数
 
 double BufCenter[], BufU1[], BufL1[], BufU2[], BufL2[], BufU3[], BufL3[], BufLag[];
 double BufBuy[], BufSell[];
@@ -94,11 +95,17 @@ int OnInit()
       Print("④拡大を見る本数は 1 以上にしてください（0 では常に不成立になる）");
       return INIT_PARAMETERS_INCORRECT;
    }
+   if(InpSigmaMult <= 0.0)
+   {
+      Print("①③で使うσの倍数は 0 より大きくしてください");
+      return INIT_PARAMETERS_INCORRECT;
+   }
 
    g_rule1.period      = InpPeriod;
    g_rule1.lagBars     = InpLagBars;
    g_rule1.useSqueeze  = InpUseSqueeze;
    g_rule1.squeezeBars = InpSqueezeBars;
+   g_rule1.sigmaMult   = InpSigmaMult;
    g_rule1.useLag      = InpUseLag;
    g_rule1.useExpand   = InpUseExpand;
    g_rule1.expandBars  = InpExpandBars;
