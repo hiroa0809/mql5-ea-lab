@@ -14,8 +14,8 @@
 //| 売買条件は docs/trading_rules.md §4.1。                          |
 //+------------------------------------------------------------------+
 #property indicator_chart_window
-#property indicator_buffers 17
-#property indicator_plots   16
+#property indicator_buffers 18
+#property indicator_plots   17
 
 #property indicator_label1  "センターライン"
 #property indicator_type1   DRAW_LINE
@@ -53,12 +53,12 @@
 #property indicator_label9  "買いサイン"
 #property indicator_type9   DRAW_ARROW
 #property indicator_color9  clrYellow
-#property indicator_width9  4
+#property indicator_width9  5
 
 #property indicator_label10 "売りサイン"
 #property indicator_type10  DRAW_ARROW
 #property indicator_color10 clrOrangeRed
-#property indicator_width10 4
+#property indicator_width10 5
 
 // 以下は線を引かない。データウィンドウで足ごとに条件の成否を読むためだけの枠。
 // どの条件で止まったのかを、チャートを見ながらその場で切り分けられる。
@@ -73,10 +73,18 @@
 #property indicator_label15 "遅行スパンの位置 (σ)"
 #property indicator_type15  DRAW_NONE
 
-#property indicator_label16 "決済サイン"
+// 決済は白にしない。ローソク足の実体が白く塗られる配色だと同化して見えない
+// （2026-08-09 に実際そうなった）。買いに関する印は足の下、売りに関する印は
+// 足の上へ揃えるので、エントリーと決済が対で追える。
+#property indicator_label16 "買いの決済"
 #property indicator_type16  DRAW_ARROW
-#property indicator_color16 clrWhite
-#property indicator_width16 3
+#property indicator_color16 clrAqua
+#property indicator_width16 5
+
+#property indicator_label17 "売りの決済"
+#property indicator_type17  DRAW_ARROW
+#property indicator_color17 clrAqua
+#property indicator_width17 5
 
 #include <Signals\SuperBollinger.mqh>
 
@@ -92,7 +100,7 @@ input int    InpExpandBars  = 3;     // ④拡大を見る本数
 double BufCenter[], BufU1[], BufL1[], BufU2[], BufL2[], BufU3[], BufL3[], BufLag[];
 double BufBuy[], BufSell[];
 double BufC1[], BufC2[], BufC3[], BufC4[], BufLagZ[];
-double BufExit[];
+double BufExitBuy[], BufExitSell[];
 double BufPos[];   // 各足を処理し終えた時点の建玉（+1 買い / −1 売り / 0 無し）
 
 SBRule1Params g_rule1;
@@ -150,19 +158,24 @@ int OnInit()
    SetIndexBuffer(12, BufC3,    INDICATOR_DATA);
    SetIndexBuffer(13, BufC4,    INDICATOR_DATA);
    SetIndexBuffer(14, BufLagZ,  INDICATOR_DATA);
-   SetIndexBuffer(15, BufExit,  INDICATOR_DATA);
-   SetIndexBuffer(16, BufPos,   INDICATOR_CALCULATIONS);
+   SetIndexBuffer(15, BufExitBuy,  INDICATOR_DATA);
+   SetIndexBuffer(16, BufExitSell, INDICATOR_DATA);
+   SetIndexBuffer(17, BufPos,      INDICATOR_CALCULATIONS);
 
-   for(int p = 0; p < 16; p++)
+   for(int p = 0; p < 17; p++)
       PlotIndexSetDouble(p, PLOT_EMPTY_VALUE, EMPTY_VALUE);
 
-   // 矢印は足の外側へ逃がす。安値・高値そのものに描くとローソク足に
-   // 重なって発火位置が読めない（負のシフトが上、正が下・単位はピクセル）
-   PlotIndexSetInteger(8, PLOT_ARROW, 233);   // ↑
-   PlotIndexSetInteger(8, PLOT_ARROW_SHIFT, 12);
-   PlotIndexSetInteger(9, PLOT_ARROW, 234);   // ↓
-   PlotIndexSetInteger(9, PLOT_ARROW_SHIFT, -12);
-   PlotIndexSetInteger(15, PLOT_ARROW, 251);  // ✗ 決済した終値の位置に置く
+   // 印は足の外側へ逃がす。安値・高値そのものに描くとローソク足に重なって
+   // 位置が読めない（負のシフトが上、正が下・単位はピクセル）。
+   // 買いは下、売りは上でエントリーと決済を揃える。
+   PlotIndexSetInteger(8,  PLOT_ARROW, 233);  // ↑ 買いエントリー
+   PlotIndexSetInteger(8,  PLOT_ARROW_SHIFT,  16);
+   PlotIndexSetInteger(9,  PLOT_ARROW, 234);  // ↓ 売りエントリー
+   PlotIndexSetInteger(9,  PLOT_ARROW_SHIFT, -16);
+   PlotIndexSetInteger(15, PLOT_ARROW, 251);  // ✗ 買いの決済
+   PlotIndexSetInteger(15, PLOT_ARROW_SHIFT,  16);
+   PlotIndexSetInteger(16, PLOT_ARROW, 251);  // ✗ 売りの決済
+   PlotIndexSetInteger(16, PLOT_ARROW_SHIFT, -16);
 
    IndicatorSetInteger(INDICATOR_DIGITS, _Digits);
    IndicatorSetString(INDICATOR_SHORTNAME,
@@ -208,8 +221,9 @@ int OnCalculate(const int rates_total,
    ArraySetAsSeries(BufC3,     true);
    ArraySetAsSeries(BufC4,     true);
    ArraySetAsSeries(BufLagZ,   true);
-   ArraySetAsSeries(BufExit,   true);
-   ArraySetAsSeries(BufPos,    true);
+   ArraySetAsSeries(BufExitBuy,  true);
+   ArraySetAsSeries(BufExitSell, true);
+   ArraySetAsSeries(BufPos,      true);
 
    // 初回は全ての足を走査する。計算に必要な本数が揃わない最も古い側にも
    // 「描かない印」を入れる必要があり、飛ばすと MT5 側の初期値のまま線が
@@ -264,9 +278,10 @@ int OnCalculate(const int rates_total,
       // 売買サインと条件の内訳。形成中の足（添字 0）には出さない。判定は
       // 確定足のみという決まりのため（docs/trading_rules.md §2.1）で、ここ
       // に出すと足の途中で現れたり消えたりする値を EA の発火と見比べてしまう。
-      BufBuy[i]  = EMPTY_VALUE;
-      BufSell[i] = EMPTY_VALUE;
-      BufExit[i] = EMPTY_VALUE;
+      BufBuy[i]       = EMPTY_VALUE;
+      BufSell[i]      = EMPTY_VALUE;
+      BufExitBuy[i]   = EMPTY_VALUE;
+      BufExitSell[i]  = EMPTY_VALUE;
       BufC1[i]   = EMPTY_VALUE;
       BufC2[i]   = EMPTY_VALUE;
       BufC3[i]   = EMPTY_VALUE;
@@ -290,10 +305,12 @@ int OnCalculate(const int rates_total,
          // 手仕舞いが先。同じ足で決済と反対のサインが揃えばドテンになる
          if(pos != 0)
          {
+            const bool wasLong = (pos > 0);
             bool doExit;
-            if(SB_Rule1Exit(close, i, InpPeriod, pos > 0, doExit) && doExit)
+            if(SB_Rule1Exit(close, i, InpPeriod, wasLong, doExit) && doExit)
             {
-               BufExit[i] = close[i];
+               if(wasLong) BufExitBuy[i]  = low[i];
+               else        BufExitSell[i] = high[i];
                pos = 0;
             }
          }
