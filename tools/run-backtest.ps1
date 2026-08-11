@@ -19,6 +19,9 @@ param(
     [string]$Symbol   = 'USDJPY#',
     [string]$Period   = 'M5',
     [int]$Exit        = 0,                        # 決済の方式 0=A 1=B 2=C
+    [int]$StagedMode  = 0,                        # 段階エントリー 0=使わない 1=装填1のみ 2=装填1+装填2
+    [double]$RsiUpper = 80,                       # 買いを見送る／決済する RSI（StagedMode=0 では効かない）
+    [double]$RsiLower = 20,                       # 売りを見送る／決済する RSI（同上）
     [int]$Model       = 2,                        # 2=始値のみ（本 EA は足の始値でしか売買しないため過不足なし）
     [int]$TimeoutMin  = 120,
     [string]$Terminal = 'C:\Program Files\XM Trading MT5\terminal64.exe'
@@ -57,11 +60,14 @@ Visual=0
 
 [TesterInputs]
 InpR1_Exit=$Exit
+InpR1_StagedMode=$StagedMode
+InpR1_RsiUpper=$RsiUpper
+InpR1_RsiLower=$RsiLower
 InpRunTag=$Tag
 "@ | Set-Content -Path $ini -Encoding ASCII
 
 Write-Host "設定: $ini"
-Write-Host "実行: $Symbol $Period  $From 〜 $To  決済方式=$Exit  識別名=$Tag"
+Write-Host "実行: $Symbol $Period  $From 〜 $To  決済方式=$Exit  段階=$StagedMode  RSI=$RsiUpper/$RsiLower  識別名=$Tag"
 
 $before = @(Get-ChildItem $common -Filter "r1_${Tag}_*" -ErrorAction SilentlyContinue).Count
 $sw = [System.Diagnostics.Stopwatch]::StartNew()
