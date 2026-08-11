@@ -92,7 +92,7 @@
 #property indicator_width17 5
 
 // 段階エントリーが有効なときだけ出る。装填した足に売買の矢印は出ない
-// （発注していないため）ので位置は競合しない。空丸→塗り丸で段階を表す。
+// （発注していないため）ので位置は競合しない。■ と ● で段階を分ける。
 #property indicator_label18 "装填1（ダマシ）"
 #property indicator_type18  DRAW_ARROW
 #property indicator_color18 clrMediumOrchid
@@ -247,7 +247,9 @@ int OnInit()
    PlotIndexSetInteger(15, PLOT_ARROW_SHIFT,  16);
    PlotIndexSetInteger(16, PLOT_ARROW, 251);  // ✗ 売りの決済
    PlotIndexSetInteger(16, PLOT_ARROW_SHIFT, -16);
-   PlotIndexSetInteger(17, PLOT_ARROW, 158);  // ○ 装填1
+   // 装填1 に 158（○）を使うと、同じ太さでも 159（●）より小さく描かれる。
+   // 字そのものが小さいので太さでは埋められない。形の違う 110（■）にする
+   PlotIndexSetInteger(17, PLOT_ARROW, 110);  // ■ 装填1
    PlotIndexSetInteger(17, PLOT_ARROW_SHIFT, -16);
    PlotIndexSetInteger(18, PLOT_ARROW, 159);  // ● 装填2
    PlotIndexSetInteger(18, PLOT_ARROW_SHIFT, -16);
