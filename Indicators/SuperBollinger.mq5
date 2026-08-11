@@ -120,8 +120,8 @@ input bool   InpUseExpand   = true;  // ④バンド幅の拡大を条件に入�
 input int    InpExpandBars  = 3;     // ④拡大を見る本数
 input ENUM_SB_EXIT InpExit  = SB_EXIT_CLOSE_SIGMA1;  // 決済の方式
 
-//--- 段階エントリー（装填1 → 装填2 → 発火）。既定は無効＝従来どおりの動き
-input bool   InpStaged      = false;  // 段階エントリー（装填1→装填2→発火）を使う
+//--- 段階エントリー。既定は「使わない」＝従来どおりの動き
+input ENUM_SB_STAGED InpStagedMode = SB_STAGED_OFF;  // 段階エントリー
 input int    InpArmBars     = 42;     // 装填が生きている本数（装填1 から数える）
 input int    InpRsiPeriod   = 14;     // RSI の期間
 input double InpRsiUpper    = 80.0;   // 買いを見送る／買いを決済する RSI
@@ -168,7 +168,7 @@ int OnInit()
       return INIT_PARAMETERS_INCORRECT;
    }
 
-   if(InpStaged)
+   if(InpStagedMode != SB_STAGED_OFF)
    {
       if(InpArmBars < 1)
       {
@@ -194,11 +194,10 @@ int OnInit()
       }
    }
 
-   g_staged.enabled   = InpStaged;
-   g_staged.armBars   = InpArmBars;
-   g_staged.rsiPeriod = InpRsiPeriod;
-   g_staged.rsiUpper  = InpRsiUpper;
-   g_staged.rsiLower  = InpRsiLower;
+   g_staged.stages   = (int)InpStagedMode;
+   g_staged.armBars  = InpArmBars;
+   g_staged.rsiUpper = InpRsiUpper;
+   g_staged.rsiLower = InpRsiLower;
 
    g_rule1.period      = InpPeriod;
    g_rule1.lagBars     = InpLagBars;
@@ -348,7 +347,7 @@ int OnCalculate(const int rates_total,
    // RSI は2段階エントリーのときだけ要る。無効なら一切触らないので、
    // RSI がまだ計算できない場面でも従来どおり線とサインが描かれる。
    double rsi[];
-   if(InpStaged)
+   if(InpStagedMode != SB_STAGED_OFF)
    {
       ArraySetAsSeries(rsi, true);
       if(CopyBuffer(g_rsiHandle, 0, 0, limit + 1, rsi) < limit + 1)
@@ -418,12 +417,12 @@ int OnCalculate(const int rates_total,
          bool entrySell = false;
          if(haveSignal)
          {
-            if(InpStaged)
+            if(InpStagedMode != SB_STAGED_OFF)
             {
                // 装填2 へ進むかは、装填1 の向きで決済条件を見る。決済の
                // 方式は入力で選んだものをそのまま使う
                const bool stopHit =
-                  SB_StagedStopHit(close, i, InpPeriod, InpLagBars, InpExit, arm);
+                  SB_StagedStopHit(close, i, InpPeriod, InpLagBars, InpExit, g_staged, arm);
 
                SBStagedResult stg;
                SB_StagedStep(s, rsi[i], stopHit, g_staged, arm, stg);
@@ -448,7 +447,7 @@ int OnCalculate(const int rates_total,
 
             // 2段階エントリーが有効なときだけ足す OR 条件。買いは RSI が
             // 上限以上、売りは下限以下で降りる
-            if(!hit && InpStaged && SB_RsiExtreme(rsi[i], wasLong, g_staged))
+            if(!hit && InpStagedMode != SB_STAGED_OFF && SB_RsiExtreme(rsi[i], wasLong, g_staged))
                hit = true;
 
             if(hit)

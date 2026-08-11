@@ -43,8 +43,8 @@ input double InpR1_SLSigma     = 2.0;    // 損切り（σの何倍）
 input bool   InpR1_UseTimeStop = false;  // 保有本数で手仕舞う
 input int    InpR1_HoldBars    = 24;     // 手仕舞うまでの本数
 
-//--- 段階エントリー（装填1 → 装填2 → 発火）。既定は無効＝従来どおりの動き
-input bool   InpR1_Staged      = false;  // 段階エントリー（装填1→装填2→発火）を使う
+//--- 段階エントリー。既定は「使わない」＝従来どおりの動き
+input ENUM_SB_STAGED InpR1_StagedMode = SB_STAGED_OFF;  // 段階エントリー
 input int    InpR1_ArmBars     = 42;     // 装填が生きている本数（装填1 から数える）
 input int    InpR1_RsiPeriod   = 14;     // RSI の期間
 input double InpR1_RsiUpper    = 80.0;   // 買いを見送る／買いを決済する RSI
@@ -134,7 +134,7 @@ int OnInit()
       return INIT_PARAMETERS_INCORRECT;
    }
 
-   if(InpR1_Staged)
+   if(InpR1_StagedMode != SB_STAGED_OFF)
    {
       if(InpR1_ArmBars < 1)
       {
@@ -160,14 +160,13 @@ int OnInit()
       }
    }
 
-   g_staged.enabled   = InpR1_Staged;
-   g_staged.armBars   = InpR1_ArmBars;
-   g_staged.rsiPeriod = InpR1_RsiPeriod;
-   g_staged.rsiUpper  = InpR1_RsiUpper;
-   g_staged.rsiLower  = InpR1_RsiLower;
-   g_arm.stage        = 0;
-   g_arm.dir          = 0;
-   g_arm.age          = 0;
+   g_staged.stages   = (int)InpR1_StagedMode;
+   g_staged.armBars  = InpR1_ArmBars;
+   g_staged.rsiUpper = InpR1_RsiUpper;
+   g_staged.rsiLower = InpR1_RsiLower;
+   g_arm.stage       = 0;
+   g_arm.dir         = 0;
+   g_arm.age         = 0;
 
    g_rule1.period      = InpR1_Period;
    g_rule1.lagBars     = InpR1_LagBars;
@@ -223,8 +222,9 @@ void OnDeinit(const int reason)
    PrintFormat("[ルール1] 損切りを最小距離まで広げた %d", g_cntWidened);
    PrintFormat("[ルール1] 決済の方式: %s", ExitName(InpR1_Exit));
 
-   if(InpR1_Staged)
+   if(InpR1_StagedMode != SB_STAGED_OFF)
    {
+      PrintFormat("[段階] 方式: %s", StagedName(InpR1_StagedMode));
       PrintFormat("[段階] 装填1 %d → 装填2 %d → 発火 %d", g_cntArm1, g_cntArm2, g_cntFired);
       PrintFormat("[段階] RSIで見送り %d / 期限切れ %d", g_cntRsiBlocked, g_cntExpired);
       PrintFormat("[段階] RSI が行きすぎで決済 %d", g_cntRsiExit);
@@ -253,7 +253,7 @@ void OnTick()
    // RSI は判定足のぶんだけ要る。ここで取れなければ足ごと見送る。装填の
    // 経過本数を数える処理より前に返すことで、数え落としが起きないようにする
    double rsi1 = 0.0;
-   if(InpR1_Staged)
+   if(InpR1_StagedMode != SB_STAGED_OFF)
    {
       double rsi[];
       ArraySetAsSeries(rsi, true);
@@ -281,12 +281,12 @@ void OnTick()
    //    従来どおりサインそのもの
    bool entryBuy  = s.buy;
    bool entrySell = s.sell;
-   if(InpR1_Staged)
+   if(InpR1_StagedMode != SB_STAGED_OFF)
    {
       // 装填2 へ進むかは、装填1 の向きで決済条件を見る。決済の方式は
       // 入力で選んだものをそのまま使う
       const bool stopHit =
-         SB_StagedStopHit(close, 1, InpR1_Period, InpR1_LagBars, InpR1_Exit, g_arm);
+         SB_StagedStopHit(close, 1, InpR1_Period, InpR1_LagBars, InpR1_Exit, g_staged, g_arm);
 
       SBStagedResult stg;
       SB_StagedStep(s, rsi1, stopHit, g_staged, g_arm, stg);
@@ -302,10 +302,13 @@ void OnTick()
       if(g_arm.stage == 0)
          Comment("装填なし");
       else
+      {
+         const bool waitStop = (g_arm.stage == 1 && InpR1_StagedMode == SB_STAGED_2);
          Comment(StringFormat("装填%d（%s・期限まであと %d 本）",
                               g_arm.stage,
-                              g_arm.stage == 1 ? "損切り待ち" : "3σ突破待ち",
+                              waitStop ? "損切り待ち" : "3σ突破待ち",
                               InpR1_ArmBars - g_arm.age));
+      }
    }
 
    //--- 手仕舞いが先。抜けた足で反対の発注も出ていればドテンになる
@@ -333,7 +336,8 @@ void OnTick()
 
       // 2段階エントリーが有効なときだけ足す OR 条件。買いは RSI が上限
       // 以上、売りは下限以下で降りる
-      if(reason == "" && InpR1_Staged && SB_RsiExtreme(rsi1, dir > 0, g_staged))
+      if(reason == "" && InpR1_StagedMode != SB_STAGED_OFF
+         && SB_RsiExtreme(rsi1, dir > 0, g_staged))
       {
          reason = "RSI が行きすぎ";
          g_cntRsiExit++;
@@ -451,7 +455,8 @@ void WriteCsv()
    FileWrite(fs, "signals_buy",   g_cntBuy);
    FileWrite(fs, "signals_sell",  g_cntSell);
    FileWrite(fs, "sl_widened",    g_cntWidened);
-   FileWrite(fs, "staged",        InpR1_Staged ? 1 : 0);
+   FileWrite(fs, "staged_mode",   (int)InpR1_StagedMode);
+   FileWrite(fs, "staged_name",   StagedName(InpR1_StagedMode));
    FileWrite(fs, "arm_bars",      InpR1_ArmBars);
    FileWrite(fs, "rsi_period",    InpR1_RsiPeriod);
    FileWrite(fs, "rsi_upper",     DoubleToString(InpR1_RsiUpper, 1));
@@ -476,6 +481,17 @@ string ExitName(const ENUM_SB_EXIT method)
    if(method == SB_EXIT_CLOSE_SIGMA1) return "終値が 1σ の内側へ戻った";
    if(method == SB_EXIT_LAG_SIGMA1)   return "遅行スパンが 1σ の内側へ戻った";
    return "遅行スパンが反対側へ陰転した";
+}
+
+//+------------------------------------------------------------------+
+//| 段階エントリーの名前。CSV とログで、どの設定の結果かを取り違え    |
+//| ないようにする（数字だけだと後で見返したときに読めない）          |
+//+------------------------------------------------------------------+
+string StagedName(const ENUM_SB_STAGED mode)
+{
+   if(mode == SB_STAGED_OFF) return "使わない";
+   if(mode == SB_STAGED_1)   return "装填1 → 発火";
+   return "装填1 → 装填2 → 発火";
 }
 
 //+------------------------------------------------------------------+

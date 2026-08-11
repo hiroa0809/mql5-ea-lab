@@ -333,7 +333,8 @@ bool SB_Rule1Exit(const double &close[], const int shift, const int period,
 //|            と同じ条件が成立した（損切りにされた想定）            |
 //|   発火  … 装填2 のあとに③突破が起きた足で発注する               |
 //|                                                                  |
-//| 装填2 を経ないと発火しない。装填1 のまま③突破が起きても入らない。|
+//| 装填2 を挟むかは設定で選ぶ。挟む設定では、装填1 のまま③突破が    |
+//| 起きても入らない。挟まない設定では装填1 の次の③突破で発火する。   |
 //|                                                                  |
 //| 発火の向きは③突破が抜けた向きで決める。装填1 の向きは引き継が    |
 //| ない（振られた側の動きをそのまま取るため）。装填1 の向きを覚えて  |
@@ -346,11 +347,24 @@ bool SB_Rule1Exit(const double &close[], const int shift, const int period,
 //|                                                                  |
 //| 既定は無効。有効にしないかぎり従来と同じ動きになる。              |
 //+------------------------------------------------------------------+
+//+------------------------------------------------------------------+
+//| 段階の数                                                         |
+//|                                                                  |
+//| 装填2 を挟むかどうかで成績がどう変わるかを比べるための選択肢。    |
+//| EA を2本に分けると同じ判定が2箇所に散り、片方だけ直したときに     |
+//| 食い違う。設定1つで切り替えれば、比較も同じバイナリで行える。     |
+//+------------------------------------------------------------------+
+enum ENUM_SB_STAGED
+{
+   SB_STAGED_OFF = 0,   // 使わない（サインで即エントリー）
+   SB_STAGED_1   = 1,   // 装填1 → 発火
+   SB_STAGED_2   = 2    // 装填1 → 装填2（損切り）→ 発火
+};
+
 struct SBStagedParams
 {
-   bool   enabled;     // 段階エントリーを使う
+   int    stages;      // ENUM_SB_STAGED の値。0 なら段階エントリーを使わない
    int    armBars;     // 装填が生きている本数（装填1 した足の次から数える）
-   int    rsiPeriod;   // RSI の期間
    double rsiUpper;    // 買いを見送る／買いを決済する RSI
    double rsiLower;    // 売りを見送る／売りを決済する RSI
 };
@@ -401,13 +415,14 @@ bool SB_RsiExtreme(const double rsi, const bool isLong, const SBStagedParams &p)
 //+------------------------------------------------------------------+
 //| 装填1 の向きで決済条件を評価する — 装填2 へ進むかどうか          |
 //|                                                                  |
-//| 装填1 のときだけ意味を持つ。向きは装填1 のもの（ダマシで建てた    |
-//| 想定の建玉が、選んでいる決済方式で切られたか）。                  |
+//| 装填2 を挟む設定で、装填1 のときだけ意味を持つ。向きは装填1 の    |
+//| もの（ダマシで建てた想定の建玉が、選んでいる決済方式で切られたか）。|
 //+------------------------------------------------------------------+
 bool SB_StagedStopHit(const double &close[], const int shift, const int period,
-                      const int lagBars, const ENUM_SB_EXIT method, const SBArmState &st)
+                      const int lagBars, const ENUM_SB_EXIT method,
+                      const SBStagedParams &p, const SBArmState &st)
 {
-   if(st.stage != 1) return false;
+   if(p.stages < 2 || st.stage != 1) return false;
 
    bool hit;
    if(!SB_Rule1Exit(close, shift, period, lagBars, method, st.dir > 0, hit)) return false;
@@ -455,7 +470,7 @@ void SB_StagedStep(const SBRule1Signal &s, const double rsi, const bool stopHit,
          st.stage    = 0;
          out.expired = true;
       }
-      else if(st.stage == 1)
+      else if(st.stage == 1 && p.stages >= 2)
       {
          // 装填1 のあいだは新しいサインを見ない。想定の建玉を持っている
          // 状態なので「建玉は1つまで」と同じ扱いにする
@@ -465,7 +480,7 @@ void SB_StagedStep(const SBRule1Signal &s, const double rsi, const bool stopHit,
             out.arm2Now = true;
          }
       }
-      else if(s.crossUp || s.crossDown)
+      else if(s.crossUp || s.crossDown)   // 装填2、または装填2 を挟まない設定の装填1
       {
          const bool isLong = s.crossUp;
          st.stage = 0;
