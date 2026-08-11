@@ -43,9 +43,9 @@ input double InpR1_SLSigma     = 2.0;    // 損切り（σの何倍）
 input bool   InpR1_UseTimeStop = false;  // 保有本数で手仕舞う
 input int    InpR1_HoldBars    = 24;     // 手仕舞うまでの本数
 
-//--- 2段階エントリー（装填 → 発火）。既定は無効＝従来どおりの動き
-input bool   InpR1_Staged      = false;  // 2段階エントリー（1回目は装填のみ）を使う
-input int    InpR1_ArmBars     = 42;     // 装填が生きている本数
+//--- 段階エントリー（装填1 → 装填2 → 発火）。既定は無効＝従来どおりの動き
+input bool   InpR1_Staged      = false;  // 段階エントリー（装填1→装填2→発火）を使う
+input int    InpR1_ArmBars     = 42;     // 装填が生きている本数（装填1 から数える）
 input int    InpR1_RsiPeriod   = 14;     // RSI の期間
 input double InpR1_RsiUpper    = 80.0;   // 買いを見送る／買いを決済する RSI
 input double InpR1_RsiLower    = 20.0;   // 売りを見送る／売りを決済する RSI
@@ -71,9 +71,10 @@ int g_cntSqueeze = 0, g_cntLag = 0, g_cntBreak = 0, g_cntExpand = 0;
 int g_cntSignal  = 0, g_cntBuy = 0, g_cntSell = 0;
 int g_cntWidened = 0;   // 損切りを最小距離まで広げた回数
 
-//--- 2段階エントリーの内訳。この案が使いものになるかは、装填が
-//    どれだけ発火・見送り・期限切れに分かれたかで判断する
-int g_cntArmed = 0, g_cntFired = 0, g_cntRsiBlocked = 0, g_cntExpired = 0;
+//--- 段階エントリーの内訳。この案が使いものになるかは、装填1 がどれだけ
+//    装填2・発火まで進んだか（どこで落ちたか）で判断する
+int g_cntArm1 = 0, g_cntArm2 = 0, g_cntFired = 0;
+int g_cntRsiBlocked = 0, g_cntExpired = 0;
 int g_cntRsiExit = 0;   // RSI が行きすぎで決済した回数
 
 //--- 1取引ぶんの記録。グロス損益はスプレッドを足し戻して求めるので、
@@ -164,7 +165,8 @@ int OnInit()
    g_staged.rsiPeriod = InpR1_RsiPeriod;
    g_staged.rsiUpper  = InpR1_RsiUpper;
    g_staged.rsiLower  = InpR1_RsiLower;
-   g_arm.armed        = false;
+   g_arm.stage        = 0;
+   g_arm.dir          = 0;
    g_arm.age          = 0;
 
    g_rule1.period      = InpR1_Period;
@@ -223,9 +225,9 @@ void OnDeinit(const int reason)
 
    if(InpR1_Staged)
    {
-      PrintFormat("[2段階] 装填 %d → 発火 %d / RSIで見送り %d / 期限切れ %d",
-                  g_cntArmed, g_cntFired, g_cntRsiBlocked, g_cntExpired);
-      PrintFormat("[2段階] RSI が行きすぎで決済 %d", g_cntRsiExit);
+      PrintFormat("[段階] 装填1 %d → 装填2 %d → 発火 %d", g_cntArm1, g_cntArm2, g_cntFired);
+      PrintFormat("[段階] RSIで見送り %d / 期限切れ %d", g_cntRsiBlocked, g_cntExpired);
+      PrintFormat("[段階] RSI が行きすぎで決済 %d", g_cntRsiExit);
    }
 }
 
@@ -275,26 +277,35 @@ void OnTick()
       if(s.buy) g_cntBuy++; else g_cntSell++;
    }
 
-   //--- 発注する足を決める。2段階エントリーが有効なら「発火」、無効なら
+   //--- 発注する足を決める。段階エントリーが有効なら「発火」、無効なら
    //    従来どおりサインそのもの
    bool entryBuy  = s.buy;
    bool entrySell = s.sell;
    if(InpR1_Staged)
    {
+      // 装填2 へ進むかは、装填1 の向きで決済条件を見る。決済の方式は
+      // 入力で選んだものをそのまま使う
+      const bool stopHit =
+         SB_StagedStopHit(close, 1, InpR1_Period, InpR1_LagBars, InpR1_Exit, g_arm);
+
       SBStagedResult stg;
-      SB_StagedStep(s, rsi1, g_staged, g_arm, stg);
+      SB_StagedStep(s, rsi1, stopHit, g_staged, g_arm, stg);
       entryBuy  = stg.fireBuy;
       entrySell = stg.fireSell;
 
-      if(stg.armedNow)          g_cntArmed++;
+      if(stg.arm1Now)           g_cntArm1++;
+      if(stg.arm2Now)           g_cntArm2++;
       if(stg.rsiBlocked)        g_cntRsiBlocked++;
       if(stg.expired)           g_cntExpired++;
       if(entryBuy || entrySell) g_cntFired++;
 
-      if(g_arm.armed)
-         Comment(StringFormat("装填中（発火まであと %d 本）", InpR1_ArmBars - g_arm.age));
-      else
+      if(g_arm.stage == 0)
          Comment("装填なし");
+      else
+         Comment(StringFormat("装填%d（%s・期限まであと %d 本）",
+                              g_arm.stage,
+                              g_arm.stage == 1 ? "損切り待ち" : "3σ突破待ち",
+                              InpR1_ArmBars - g_arm.age));
    }
 
    //--- 手仕舞いが先。抜けた足で反対の発注も出ていればドテンになる
@@ -445,7 +456,8 @@ void WriteCsv()
    FileWrite(fs, "rsi_period",    InpR1_RsiPeriod);
    FileWrite(fs, "rsi_upper",     DoubleToString(InpR1_RsiUpper, 1));
    FileWrite(fs, "rsi_lower",     DoubleToString(InpR1_RsiLower, 1));
-   FileWrite(fs, "armed",         g_cntArmed);
+   FileWrite(fs, "armed1",        g_cntArm1);
+   FileWrite(fs, "armed2",        g_cntArm2);
    FileWrite(fs, "fired",         g_cntFired);
    FileWrite(fs, "rsi_blocked",   g_cntRsiBlocked);
    FileWrite(fs, "arm_expired",   g_cntExpired);

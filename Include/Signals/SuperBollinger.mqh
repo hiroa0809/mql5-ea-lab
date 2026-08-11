@@ -322,14 +322,22 @@ bool SB_Rule1Exit(const double &close[], const int shift, const int period,
 }
 
 //+------------------------------------------------------------------+
-//| 2段階エントリー（装填 → 発火）                                    |
+//| 段階エントリー（装填1 → 装填2 → 発火）                           |
 //|                                                                  |
 //| 狙い: 膠着から拡大へ向かう場面の1回目のサインは、逆へ振られて     |
-//| 損切りにされることが多い。そこで1回目は発注せず「装填」だけ行い、 |
-//| 続いて起きた③突破で発注する。                                    |
+//| 損切りにされることが多い。その「ダマシで振られて切られる」ひと     |
+//| 続きを丸ごと通過してから入る。                                    |
 //|                                                                  |
-//| 装填は向きを持たない。買いサインで装填したあと遅行スパンが下へ    |
-//| 抜ければ売りで入る。振られた側の動きをそのまま取るため。          |
+//|   装填1 … ルール1のサインが出た（ダマシが発生した想定）          |
+//|   装填2 … 装填1 の向きで建てた想定の建玉に、選んでいる決済方式    |
+//|            と同じ条件が成立した（損切りにされた想定）            |
+//|   発火  … 装填2 のあとに③突破が起きた足で発注する               |
+//|                                                                  |
+//| 装填2 を経ないと発火しない。装填1 のまま③突破が起きても入らない。|
+//|                                                                  |
+//| 発火の向きは③突破が抜けた向きで決める。装填1 の向きは引き継が    |
+//| ない（振られた側の動きをそのまま取るため）。装填1 の向きを覚えて  |
+//| いるのは、装填2 の判定に使う決済条件が向きを要るからだけ。        |
 //|                                                                  |
 //| 発火が見るのは③突破だけで①②④は問わない。①膠着は「直前       |
 //| squeezeBars 本のあいだ帯の内側」を要求するので、2度目のサインは  |
@@ -340,8 +348,8 @@ bool SB_Rule1Exit(const double &close[], const int shift, const int period,
 //+------------------------------------------------------------------+
 struct SBStagedParams
 {
-   bool   enabled;     // 2段階エントリーを使う
-   int    armBars;     // 装填が生きている本数（装填した足の次から数える）
+   bool   enabled;     // 段階エントリーを使う
+   int    armBars;     // 装填が生きている本数（装填1 した足の次から数える）
    int    rsiPeriod;   // RSI の期間
    double rsiUpper;    // 買いを見送る／買いを決済する RSI
    double rsiLower;    // 売りを見送る／売りを決済する RSI
@@ -350,14 +358,19 @@ struct SBStagedParams
 //+------------------------------------------------------------------+
 //| 装填の状態 — 足をまたいで持ち越す                                |
 //|                                                                  |
-//| age は装填した足を 0 として数えた経過本数。装填した足そのものは   |
-//| 発火に数えない（その足では③が成立しているので、数えると従来と    |
-//| 同じ足で発注してしまい 2段階にならない）。                        |
+//| age は装填1 した足を 0 として数えた経過本数。装填2 へ進んでも     |
+//| 数え直さない。期限は「装填1 から armBars 本」のひと続きで、       |
+//| 装填2 に別枠を与えない（枠を2つにすると最長で倍待つことになり、   |
+//| 振られた直後を取るという狙いから外れる）。                        |
+//|                                                                  |
+//| 装填1 した足そのものは装填2 に数えない。その足は建てた足に当たる  |
+//| ので、同じ足で決済条件を見ると建てた瞬間に切られた扱いになる。    |
 //+------------------------------------------------------------------+
 struct SBArmState
 {
-   bool armed;
-   int  age;
+   int stage;   // 0 = 装填なし / 1 = 装填1 / 2 = 装填2
+   int dir;     // 装填1 の向き（+1 買い / −1 売り）。装填2 の判定に使う
+   int age;
 };
 
 //+------------------------------------------------------------------+
@@ -367,7 +380,8 @@ struct SBStagedResult
 {
    bool fireBuy;      // 発火（買い）
    bool fireSell;     // 発火（売り）
-   bool armedNow;     // この足で装填した
+   bool arm1Now;      // この足で装填1（ダマシが発生した）
+   bool arm2Now;      // この足で装填2（損切りにされた）
    bool rsiBlocked;   // 3σ を抜けたが RSI が行きすぎで見送った
    bool expired;      // 期限切れで装填を解除した
 };
@@ -385,41 +399,76 @@ bool SB_RsiExtreme(const double rsi, const bool isLong, const SBStagedParams &p)
 }
 
 //+------------------------------------------------------------------+
+//| 装填1 の向きで決済条件を評価する — 装填2 へ進むかどうか          |
+//|                                                                  |
+//| 装填1 のときだけ意味を持つ。向きは装填1 のもの（ダマシで建てた    |
+//| 想定の建玉が、選んでいる決済方式で切られたか）。                  |
+//+------------------------------------------------------------------+
+bool SB_StagedStopHit(const double &close[], const int shift, const int period,
+                      const int lagBars, const ENUM_SB_EXIT method, const SBArmState &st)
+{
+   if(st.stage != 1) return false;
+
+   bool hit;
+   if(!SB_Rule1Exit(close, shift, period, lagBars, method, st.dir > 0, hit)) return false;
+   return hit;
+}
+
+//+------------------------------------------------------------------+
 //| 装填の状態を1本ぶん進める                                        |
+//|                                                                  |
+//| stopHit には SB_StagedStopHit の結果を渡す。決済条件の評価に      |
+//| 終値配列と決済方式が要り、それを本関数へ持ち込むと引数が増える    |
+//| だけなので、呼ぶ側で求めてから渡す形にしている。                  |
 //|                                                                  |
 //| st は入出力。呼ぶ側が古い足から新しい足へ順に呼ぶこと。逆順や     |
 //| 飛ばし呼びをすると経過本数が狂うが、エラーにはならない。          |
 //|                                                                  |
+//| 1本で進む段階は1つまで。損切りと③突破が同じ足で揃っても、その足  |
+//| は装填2 で止め、発火は次の足以降に見る（装填2「を経てから」発火   |
+//| という決まりをそのまま書いている）。                              |
+//|                                                                  |
 //| 建玉の有無は見ない。保有中に発火しても、発注するかどうかを決める  |
 //| のは呼ぶ側（建玉は1つまで、という決まりは従来どおり呼ぶ側が持つ）。|
 //+------------------------------------------------------------------+
-void SB_StagedStep(const SBRule1Signal &s, const double rsi,
+void SB_StagedStep(const SBRule1Signal &s, const double rsi, const bool stopHit,
                    const SBStagedParams &p, SBArmState &st, SBStagedResult &out)
 {
    out.fireBuy    = false;
    out.fireSell   = false;
-   out.armedNow   = false;
+   out.arm1Now    = false;
+   out.arm2Now    = false;
    out.rsiBlocked = false;
    out.expired    = false;
 
-   // 発火・見送りで装填を使い切った足では、同じ足で装填し直さない。
+   // 発火・見送りで装填を使い切った足では、同じ足で装填1 をやり直さない。
    // 期限切れは使い切りに含めない（その足に新しいサインが出ていれば
    // 装填してよい。古い装填が終わっただけなので）
    bool consumed = false;
 
-   if(st.armed)
+   if(st.stage != 0)
    {
       st.age++;
 
       if(st.age > p.armBars)
       {
-         st.armed    = false;
+         st.stage    = 0;
          out.expired = true;
+      }
+      else if(st.stage == 1)
+      {
+         // 装填1 のあいだは新しいサインを見ない。想定の建玉を持っている
+         // 状態なので「建玉は1つまで」と同じ扱いにする
+         if(stopHit)
+         {
+            st.stage    = 2;
+            out.arm2Now = true;
+         }
       }
       else if(s.crossUp || s.crossDown)
       {
          const bool isLong = s.crossUp;
-         st.armed = false;
+         st.stage = 0;
          consumed = true;
 
          if(SB_RsiExtreme(rsi, isLong, p))
@@ -431,11 +480,12 @@ void SB_StagedStep(const SBRule1Signal &s, const double rsi,
       }
    }
 
-   if(!consumed && !st.armed && (s.buy || s.sell))
+   if(!consumed && st.stage == 0 && (s.buy || s.sell))
    {
-      st.armed     = true;
-      st.age       = 0;
-      out.armedNow = true;
+      st.stage    = 1;
+      st.dir      = s.buy ? +1 : -1;
+      st.age      = 0;
+      out.arm1Now = true;
    }
 }
 

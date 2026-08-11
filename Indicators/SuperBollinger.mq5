@@ -19,8 +19,8 @@
 //| 売買条件は docs/trading_rules.md §4.1。                          |
 //+------------------------------------------------------------------+
 #property indicator_chart_window
-#property indicator_buffers 21
-#property indicator_plots   20
+#property indicator_buffers 23
+#property indicator_plots   21
 
 #property indicator_label1  "センターライン"
 #property indicator_type1   DRAW_LINE
@@ -91,17 +91,22 @@
 #property indicator_color17 clrAqua
 #property indicator_width17 5
 
-// 2段階エントリーが有効なときだけ出る。装填は向きを持たないので印は1種類。
-// 装填した足に売買の矢印は出ない（発注していないため）ので位置は競合しない。
-#property indicator_label18 "装填"
+// 段階エントリーが有効なときだけ出る。装填した足に売買の矢印は出ない
+// （発注していないため）ので位置は競合しない。空丸→塗り丸で段階を表す。
+#property indicator_label18 "装填1（ダマシ）"
 #property indicator_type18  DRAW_ARROW
 #property indicator_color18 clrMediumOrchid
 #property indicator_width18 3
 
-#property indicator_label19 "装填 (1=装填中)"
-#property indicator_type19  DRAW_NONE
-#property indicator_label20 "装填からの本数"
+#property indicator_label19 "装填2（損切り）"
+#property indicator_type19  DRAW_ARROW
+#property indicator_color19 clrHotPink
+#property indicator_width19 3
+
+#property indicator_label20 "装填 (1=装填1 2=装填2)"
 #property indicator_type20  DRAW_NONE
+#property indicator_label21 "装填1 からの本数"
+#property indicator_type21  DRAW_NONE
 
 #include <Signals\SuperBollinger.mqh>
 
@@ -115,9 +120,9 @@ input bool   InpUseExpand   = true;  // ④バンド幅の拡大を条件に入�
 input int    InpExpandBars  = 3;     // ④拡大を見る本数
 input ENUM_SB_EXIT InpExit  = SB_EXIT_CLOSE_SIGMA1;  // 決済の方式
 
-//--- 2段階エントリー（装填 → 発火）。既定は無効＝従来どおりの動き
-input bool   InpStaged      = false;  // 2段階エントリー（1回目は装填のみ）を使う
-input int    InpArmBars     = 42;     // 装填が生きている本数
+//--- 段階エントリー（装填1 → 装填2 → 発火）。既定は無効＝従来どおりの動き
+input bool   InpStaged      = false;  // 段階エントリー（装填1→装填2→発火）を使う
+input int    InpArmBars     = 42;     // 装填が生きている本数（装填1 から数える）
 input int    InpRsiPeriod   = 14;     // RSI の期間
 input double InpRsiUpper    = 80.0;   // 買いを見送る／買いを決済する RSI
 input double InpRsiLower    = 20.0;   // 売りを見送る／売りを決済する RSI
@@ -126,8 +131,9 @@ double BufCenter[], BufU1[], BufL1[], BufU2[], BufL2[], BufU3[], BufL3[], BufLag
 double BufBuy[], BufSell[];
 double BufC1[], BufC2[], BufC3[], BufC4[], BufLagZ[];
 double BufExitBuy[], BufExitSell[];
-double BufArm[], BufArmed[], BufArmAge[];
-double BufPos[];   // 各足を処理し終えた時点の建玉（+1 買い / −1 売り / 0 無し）
+double BufArm1[], BufArm2[], BufArmStage[], BufArmAge[];
+double BufArmDir[]; // 装填1 の向き。差分更新で状態を引き継ぐためだけに持つ
+double BufPos[];    // 各足を処理し終えた時点の建玉（+1 買い / −1 売り / 0 無し）
 
 SBRule1Params  g_rule1;
 SBStagedParams g_staged;
@@ -220,12 +226,14 @@ int OnInit()
    SetIndexBuffer(14, BufLagZ,  INDICATOR_DATA);
    SetIndexBuffer(15, BufExitBuy,  INDICATOR_DATA);
    SetIndexBuffer(16, BufExitSell, INDICATOR_DATA);
-   SetIndexBuffer(17, BufArm,      INDICATOR_DATA);
-   SetIndexBuffer(18, BufArmed,    INDICATOR_DATA);
-   SetIndexBuffer(19, BufArmAge,   INDICATOR_DATA);
-   SetIndexBuffer(20, BufPos,      INDICATOR_CALCULATIONS);
+   SetIndexBuffer(17, BufArm1,     INDICATOR_DATA);
+   SetIndexBuffer(18, BufArm2,     INDICATOR_DATA);
+   SetIndexBuffer(19, BufArmStage, INDICATOR_DATA);
+   SetIndexBuffer(20, BufArmAge,   INDICATOR_DATA);
+   SetIndexBuffer(21, BufArmDir,   INDICATOR_CALCULATIONS);
+   SetIndexBuffer(22, BufPos,      INDICATOR_CALCULATIONS);
 
-   for(int p = 0; p < 20; p++)
+   for(int p = 0; p < 21; p++)
       PlotIndexSetDouble(p, PLOT_EMPTY_VALUE, EMPTY_VALUE);
 
    // 印は足の外側へ逃がす。安値・高値そのものに描くとローソク足に重なって
@@ -239,8 +247,10 @@ int OnInit()
    PlotIndexSetInteger(15, PLOT_ARROW_SHIFT,  16);
    PlotIndexSetInteger(16, PLOT_ARROW, 251);  // ✗ 売りの決済
    PlotIndexSetInteger(16, PLOT_ARROW_SHIFT, -16);
-   PlotIndexSetInteger(17, PLOT_ARROW, 159);  // ● 装填（向きを持たないので足の上に固定）
+   PlotIndexSetInteger(17, PLOT_ARROW, 158);  // ○ 装填1
    PlotIndexSetInteger(17, PLOT_ARROW_SHIFT, -16);
+   PlotIndexSetInteger(18, PLOT_ARROW, 159);  // ● 装填2
+   PlotIndexSetInteger(18, PLOT_ARROW_SHIFT, -16);
 
    IndicatorSetInteger(INDICATOR_DIGITS, _Digits);
    IndicatorSetString(INDICATOR_SHORTNAME,
@@ -295,9 +305,11 @@ int OnCalculate(const int rates_total,
    ArraySetAsSeries(BufLagZ,   true);
    ArraySetAsSeries(BufExitBuy,  true);
    ArraySetAsSeries(BufExitSell, true);
-   ArraySetAsSeries(BufArm,      true);
-   ArraySetAsSeries(BufArmed,    true);
+   ArraySetAsSeries(BufArm1,     true);
+   ArraySetAsSeries(BufArm2,     true);
+   ArraySetAsSeries(BufArmStage, true);
    ArraySetAsSeries(BufArmAge,   true);
+   ArraySetAsSeries(BufArmDir,   true);
    ArraySetAsSeries(BufPos,      true);
 
    // 初回は全ての足を走査する。計算に必要な本数が揃わない最も古い側にも
@@ -320,12 +332,14 @@ int OnCalculate(const int rates_total,
    // 古い足の状態を引き継ぐ（前回の計算で BufPos に残っている）。
    int pos = 0;
    SBArmState arm;
-   arm.armed = false;
+   arm.stage = 0;
+   arm.dir   = 0;
    arm.age   = 0;
    if(limit + 1 <= rates_total - 1)
    {
       pos       = (int)BufPos[limit + 1];
-      arm.armed = (BufArmed[limit + 1] > 0.5);
+      arm.stage = (int)BufArmStage[limit + 1];
+      arm.dir   = (int)BufArmDir[limit + 1];
       arm.age   = (int)BufArmAge[limit + 1];
    }
 
@@ -379,7 +393,8 @@ int OnCalculate(const int rates_total,
       BufC3[i]   = EMPTY_VALUE;
       BufC4[i]   = EMPTY_VALUE;
       BufLagZ[i] = EMPTY_VALUE;
-      BufArm[i]  = EMPTY_VALUE;
+      BufArm1[i] = EMPTY_VALUE;
+      BufArm2[i] = EMPTY_VALUE;
       if(i >= 1)
       {
          SBRule1Signal s;
@@ -403,12 +418,17 @@ int OnCalculate(const int rates_total,
          {
             if(InpStaged)
             {
+               // 装填2 へ進むかは、装填1 の向きで決済条件を見る。決済の
+               // 方式は入力で選んだものをそのまま使う
+               const bool stopHit =
+                  SB_StagedStopHit(close, i, InpPeriod, InpLagBars, InpExit, arm);
+
                SBStagedResult stg;
-               SB_StagedStep(s, rsi[i], g_staged, arm, stg);
+               SB_StagedStep(s, rsi[i], stopHit, g_staged, arm, stg);
                entryBuy  = stg.fireBuy;
                entrySell = stg.fireSell;
-               if(stg.armedNow)
-                  BufArm[i] = high[i];
+               if(stg.arm1Now) BufArm1[i] = high[i];
+               if(stg.arm2Now) BufArm2[i] = high[i];
             }
             else
             {
@@ -445,9 +465,10 @@ int OnCalculate(const int rates_total,
             if(entrySell) { BufSell[i] = high[i]; pos = -1; }
          }
       }
-      BufArmed[i]  = arm.armed ? 1.0 : 0.0;
-      BufArmAge[i] = arm.armed ? (double)arm.age : 0.0;
-      BufPos[i]    = pos;
+      BufArmStage[i] = (double)arm.stage;
+      BufArmAge[i]   = (arm.stage != 0) ? (double)arm.age : 0.0;
+      BufArmDir[i]   = (double)arm.dir;
+      BufPos[i]      = pos;
    }
 
    return rates_total;
