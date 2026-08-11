@@ -14,6 +14,8 @@
 param(
     [string]$From = '2018.11.01',
     [string]$To   = '2022.12.31',
+    [int]$RsiExit = 1,          # RSI 決済 0=使わない 1=使う
+    [string]$Suffix = '',       # 識別名の末尾（過去の実行と CSV がぶつからないように）
     [int]$TimeoutMin = 120
 )
 
@@ -24,13 +26,23 @@ $exits  = @{ 0 = 'A'; 1 = 'B'; 2 = 'C' }
 $combos = @()
 
 foreach ($e in 0, 1, 2) {
-    # 段階なし（RSI は効かないので1通りだけ）
-    $combos += [pscustomobject]@{ Tag = "$($exits[$e])_off"; Exit = $e; Staged = 0; Up = 80; Low = 20 }
+    # 段階なし。RSI の入口フィルタは効かないので、RSI 決済も使わないなら
+    # 閾値違いは同じ結果になる。使う場合だけ閾値ごとに回す
+    if ($RsiExit -eq 0) {
+        $combos += [pscustomobject]@{ Tag = "$($exits[$e])_off$Suffix"; Exit = $e; Staged = 0; Up = 80; Low = 20 }
+    }
+    else {
+        foreach ($r in @(@(80, 20), @(70, 30))) {
+            $combos += [pscustomobject]@{
+                Tag = "$($exits[$e])_off_$($r[0])$($r[1])$Suffix"; Exit = $e; Staged = 0; Up = $r[0]; Low = $r[1]
+            }
+        }
+    }
 
     foreach ($s in 1, 2) {
         foreach ($r in @(@(80, 20), @(70, 30))) {
             $combos += [pscustomobject]@{
-                Tag    = "$($exits[$e])_s$($s)_$($r[0])$($r[1])"
+                Tag    = "$($exits[$e])_s$($s)_$($r[0])$($r[1])$Suffix"
                 Exit   = $e
                 Staged = $s
                 Up     = $r[0]
@@ -53,7 +65,7 @@ for ($i = 0; $i -lt $combos.Count; $i++) {
 
     try {
         & $runner -Tag $c.Tag -From $From -To $To `
-                  -Exit $c.Exit -StagedMode $c.Staged `
+                  -Exit $c.Exit -StagedMode $c.Staged -RsiExit $RsiExit `
                   -RsiUpper $c.Up -RsiLower $c.Low -TimeoutMin $TimeoutMin
     }
     catch {

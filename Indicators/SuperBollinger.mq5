@@ -123,6 +123,7 @@ input ENUM_SB_EXIT InpExit  = SB_EXIT_CLOSE_SIGMA1;  // 決済の方式
 //--- 段階エントリー。既定は「使わない」＝従来どおりの動き
 input ENUM_SB_STAGED InpStagedMode = SB_STAGED_OFF;  // 段階エントリー
 input int    InpArmBars     = 42;     // 装填が生きている本数（装填1 から数える）
+input bool   InpUseRsiExit  = false;  // RSI が行きすぎたら決済する（段階エントリーとは独立）
 input int    InpRsiPeriod   = 14;     // RSI の期間
 input double InpRsiUpper    = 80.0;   // 買いを見送る／買いを決済する RSI
 input double InpRsiLower    = 20.0;   // 売りを見送る／売りを決済する RSI
@@ -138,6 +139,7 @@ double BufPos[];    // 各足を処理し終えた時点の建玉（+1 買い / 
 SBRule1Params  g_rule1;
 SBStagedParams g_staged;
 int            g_rsiHandle = INVALID_HANDLE;
+bool           g_needRsi   = false;   // 入口の見送りか決済か、どちらかで RSI を使う
 
 //+------------------------------------------------------------------+
 int OnInit()
@@ -168,13 +170,16 @@ int OnInit()
       return INIT_PARAMETERS_INCORRECT;
    }
 
-   if(InpStagedMode != SB_STAGED_OFF)
+   g_needRsi = (InpStagedMode != SB_STAGED_OFF) || InpUseRsiExit;
+
+   if(InpStagedMode != SB_STAGED_OFF && InpArmBars < 1)
    {
-      if(InpArmBars < 1)
-      {
-         Print("装填が生きている本数は 1 以上にしてください");
-         return INIT_PARAMETERS_INCORRECT;
-      }
+      Print("装填が生きている本数は 1 以上にしてください");
+      return INIT_PARAMETERS_INCORRECT;
+   }
+
+   if(g_needRsi)
+   {
       if(InpRsiPeriod < 2)
       {
          Print("RSI の期間は 2 以上にしてください");
@@ -347,7 +352,7 @@ int OnCalculate(const int rates_total,
    // RSI は2段階エントリーのときだけ要る。無効なら一切触らないので、
    // RSI がまだ計算できない場面でも従来どおり線とサインが描かれる。
    double rsi[];
-   if(InpStagedMode != SB_STAGED_OFF)
+   if(g_needRsi)
    {
       ArraySetAsSeries(rsi, true);
       if(CopyBuffer(g_rsiHandle, 0, 0, limit + 1, rsi) < limit + 1)
@@ -445,9 +450,8 @@ int OnCalculate(const int rates_total,
             bool doExit = false;
             bool hit = SB_Rule1Exit(close, i, InpPeriod, InpLagBars, InpExit, wasLong, doExit) && doExit;
 
-            // 2段階エントリーが有効なときだけ足す OR 条件。買いは RSI が
-            // 上限以上、売りは下限以下で降りる
-            if(!hit && InpStagedMode != SB_STAGED_OFF && SB_RsiExtreme(rsi[i], wasLong, g_staged))
+            // 独立した OR 条件。買いは RSI が上限以上、売りは下限以下で降りる
+            if(!hit && InpUseRsiExit && SB_RsiExtreme(rsi[i], wasLong, g_staged))
                hit = true;
 
             if(hit)

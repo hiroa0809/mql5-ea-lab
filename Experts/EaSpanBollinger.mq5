@@ -46,6 +46,7 @@ input int    InpR1_HoldBars    = 24;     // 手仕舞うまでの本数
 //--- 段階エントリー。既定は「使わない」＝従来どおりの動き
 input ENUM_SB_STAGED InpR1_StagedMode = SB_STAGED_OFF;  // 段階エントリー
 input int    InpR1_ArmBars     = 42;     // 装填が生きている本数（装填1 から数える）
+input bool   InpR1_UseRsiExit  = false;  // RSI が行きすぎたら決済する（段階エントリーとは独立）
 input int    InpR1_RsiPeriod   = 14;     // RSI の期間
 input double InpR1_RsiUpper    = 80.0;   // 買いを見送る／買いを決済する RSI
 input double InpR1_RsiLower    = 20.0;   // 売りを見送る／売りを決済する RSI
@@ -59,6 +60,7 @@ SBRule1Params  g_rule1;
 SBStagedParams g_staged;
 SBArmState     g_arm;
 int            g_rsiHandle   = INVALID_HANDLE;
+bool           g_needRsi     = false;   // 入口の見送りか決済か、どちらかで RSI を使う
 datetime       g_lastBarTime = 0;
 ulong          g_posTicket   = 0;
 int            g_barsHeld    = 0;
@@ -134,13 +136,16 @@ int OnInit()
       return INIT_PARAMETERS_INCORRECT;
    }
 
-   if(InpR1_StagedMode != SB_STAGED_OFF)
+   g_needRsi = (InpR1_StagedMode != SB_STAGED_OFF) || InpR1_UseRsiExit;
+
+   if(InpR1_StagedMode != SB_STAGED_OFF && InpR1_ArmBars < 1)
    {
-      if(InpR1_ArmBars < 1)
-      {
-         Print("装填が生きている本数は 1 以上にしてください");
-         return INIT_PARAMETERS_INCORRECT;
-      }
+      Print("装填が生きている本数は 1 以上にしてください");
+      return INIT_PARAMETERS_INCORRECT;
+   }
+
+   if(g_needRsi)
+   {
       if(InpR1_RsiPeriod < 2)
       {
          Print("RSI の期間は 2 以上にしてください");
@@ -227,8 +232,9 @@ void OnDeinit(const int reason)
       PrintFormat("[段階] 方式: %s", StagedName(InpR1_StagedMode));
       PrintFormat("[段階] 装填1 %d → 装填2 %d → 発火 %d", g_cntArm1, g_cntArm2, g_cntFired);
       PrintFormat("[段階] RSIで見送り %d / 期限切れ %d", g_cntRsiBlocked, g_cntExpired);
-      PrintFormat("[段階] RSI が行きすぎで決済 %d", g_cntRsiExit);
    }
+   if(InpR1_UseRsiExit)
+      PrintFormat("[RSI決済] RSI が行きすぎで決済 %d", g_cntRsiExit);
 }
 
 //+------------------------------------------------------------------+
@@ -253,7 +259,7 @@ void OnTick()
    // RSI は判定足のぶんだけ要る。ここで取れなければ足ごと見送る。装填の
    // 経過本数を数える処理より前に返すことで、数え落としが起きないようにする
    double rsi1 = 0.0;
-   if(InpR1_StagedMode != SB_STAGED_OFF)
+   if(g_needRsi)
    {
       double rsi[];
       ArraySetAsSeries(rsi, true);
@@ -334,10 +340,10 @@ void OnTick()
             reason = ExitName(InpR1_Exit);
       }
 
-      // 2段階エントリーが有効なときだけ足す OR 条件。買いは RSI が上限
-      // 以上、売りは下限以下で降りる
-      if(reason == "" && InpR1_StagedMode != SB_STAGED_OFF
-         && SB_RsiExtreme(rsi1, dir > 0, g_staged))
+      // 独立した OR 条件。買いは RSI が上限以上、売りは下限以下で降りる。
+      // 段階エントリーとは別スイッチにしてある。同じスイッチにすると
+      // 「入口の段階化」と「早期決済」のどちらが効いたのか分離できない
+      if(reason == "" && InpR1_UseRsiExit && SB_RsiExtreme(rsi1, dir > 0, g_staged))
       {
          reason = "RSI が行きすぎ";
          g_cntRsiExit++;
@@ -457,6 +463,7 @@ void WriteCsv()
    FileWrite(fs, "sl_widened",    g_cntWidened);
    FileWrite(fs, "staged_mode",   (int)InpR1_StagedMode);
    FileWrite(fs, "staged_name",   StagedName(InpR1_StagedMode));
+   FileWrite(fs, "use_rsi_exit",  InpR1_UseRsiExit ? 1 : 0);
    FileWrite(fs, "arm_bars",      InpR1_ArmBars);
    FileWrite(fs, "rsi_period",    InpR1_RsiPeriod);
    FileWrite(fs, "rsi_upper",     DoubleToString(InpR1_RsiUpper, 1));
