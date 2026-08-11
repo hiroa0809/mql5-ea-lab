@@ -96,12 +96,12 @@
 #property indicator_label18 "装填1（ダマシ）"
 #property indicator_type18  DRAW_ARROW
 #property indicator_color18 clrMediumOrchid
-#property indicator_width18 3
+#property indicator_width18 5
 
 #property indicator_label19 "装填2（損切り）"
 #property indicator_type19  DRAW_ARROW
 #property indicator_color19 clrHotPink
-#property indicator_width19 3
+#property indicator_width19 5
 
 #property indicator_label20 "装填 (1=装填1 2=装填2)"
 #property indicator_type20  DRAW_NONE
