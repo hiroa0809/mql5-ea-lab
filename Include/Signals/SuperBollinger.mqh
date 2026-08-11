@@ -321,4 +321,122 @@ bool SB_Rule1Exit(const double &close[], const int shift, const int period,
    return true;
 }
 
+//+------------------------------------------------------------------+
+//| 2段階エントリー（装填 → 発火）                                    |
+//|                                                                  |
+//| 狙い: 膠着から拡大へ向かう場面の1回目のサインは、逆へ振られて     |
+//| 損切りにされることが多い。そこで1回目は発注せず「装填」だけ行い、 |
+//| 続いて起きた③突破で発注する。                                    |
+//|                                                                  |
+//| 装填は向きを持たない。買いサインで装填したあと遅行スパンが下へ    |
+//| 抜ければ売りで入る。振られた側の動きをそのまま取るため。          |
+//|                                                                  |
+//| 発火が見るのは③突破だけで①②④は問わない。①膠着は「直前       |
+//| squeezeBars 本のあいだ帯の内側」を要求するので、2度目のサインは  |
+//| 構造上 squeezeBars 本より後にしか出ない。それを待つと「振られた   |
+//| 直後の動きを取る」という狙いから外れる。                          |
+//|                                                                  |
+//| 既定は無効。有効にしないかぎり従来と同じ動きになる。              |
+//+------------------------------------------------------------------+
+struct SBStagedParams
+{
+   bool   enabled;     // 2段階エントリーを使う
+   int    armBars;     // 装填が生きている本数（装填した足の次から数える）
+   int    rsiPeriod;   // RSI の期間
+   double rsiUpper;    // 買いを見送る／買いを決済する RSI
+   double rsiLower;    // 売りを見送る／売りを決済する RSI
+};
+
+//+------------------------------------------------------------------+
+//| 装填の状態 — 足をまたいで持ち越す                                |
+//|                                                                  |
+//| age は装填した足を 0 として数えた経過本数。装填した足そのものは   |
+//| 発火に数えない（その足では③が成立しているので、数えると従来と    |
+//| 同じ足で発注してしまい 2段階にならない）。                        |
+//+------------------------------------------------------------------+
+struct SBArmState
+{
+   bool armed;
+   int  age;
+};
+
+//+------------------------------------------------------------------+
+//| 1本ぶんの結果。fireBuy / fireSell 以外は診断と表示に使う          |
+//+------------------------------------------------------------------+
+struct SBStagedResult
+{
+   bool fireBuy;      // 発火（買い）
+   bool fireSell;     // 発火（売り）
+   bool armedNow;     // この足で装填した
+   bool rsiBlocked;   // 3σ を抜けたが RSI が行きすぎで見送った
+   bool expired;      // 期限切れで装填を解除した
+};
+
+//+------------------------------------------------------------------+
+//| RSI が行きすぎ側にあるか                                         |
+//|                                                                  |
+//| 買い側は上限以上、売り側は下限以下。エントリーの見送りと、保有中  |
+//| の決済の両方が同じ判定を使う。「行きすぎているなら入らない・      |
+//| 持っているなら降りる」で向きがそろう。                            |
+//+------------------------------------------------------------------+
+bool SB_RsiExtreme(const double rsi, const bool isLong, const SBStagedParams &p)
+{
+   return isLong ? (rsi >= p.rsiUpper) : (rsi <= p.rsiLower);
+}
+
+//+------------------------------------------------------------------+
+//| 装填の状態を1本ぶん進める                                        |
+//|                                                                  |
+//| st は入出力。呼ぶ側が古い足から新しい足へ順に呼ぶこと。逆順や     |
+//| 飛ばし呼びをすると経過本数が狂うが、エラーにはならない。          |
+//|                                                                  |
+//| 建玉の有無は見ない。保有中に発火しても、発注するかどうかを決める  |
+//| のは呼ぶ側（建玉は1つまで、という決まりは従来どおり呼ぶ側が持つ）。|
+//+------------------------------------------------------------------+
+void SB_StagedStep(const SBRule1Signal &s, const double rsi,
+                   const SBStagedParams &p, SBArmState &st, SBStagedResult &out)
+{
+   out.fireBuy    = false;
+   out.fireSell   = false;
+   out.armedNow   = false;
+   out.rsiBlocked = false;
+   out.expired    = false;
+
+   // 発火・見送りで装填を使い切った足では、同じ足で装填し直さない。
+   // 期限切れは使い切りに含めない（その足に新しいサインが出ていれば
+   // 装填してよい。古い装填が終わっただけなので）
+   bool consumed = false;
+
+   if(st.armed)
+   {
+      st.age++;
+
+      if(st.age > p.armBars)
+      {
+         st.armed    = false;
+         out.expired = true;
+      }
+      else if(s.crossUp || s.crossDown)
+      {
+         const bool isLong = s.crossUp;
+         st.armed = false;
+         consumed = true;
+
+         if(SB_RsiExtreme(rsi, isLong, p))
+            out.rsiBlocked = true;      // 見送り。装填も解除する
+         else if(isLong)
+            out.fireBuy  = true;
+         else
+            out.fireSell = true;
+      }
+   }
+
+   if(!consumed && !st.armed && (s.buy || s.sell))
+   {
+      st.armed     = true;
+      st.age       = 0;
+      out.armedNow = true;
+   }
+}
+
 #endif // SUPERBOLLINGER_MQH

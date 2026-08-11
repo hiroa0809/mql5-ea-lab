@@ -43,16 +43,26 @@ input double InpR1_SLSigma     = 2.0;    // 損切り（σの何倍）
 input bool   InpR1_UseTimeStop = false;  // 保有本数で手仕舞う
 input int    InpR1_HoldBars    = 24;     // 手仕舞うまでの本数
 
+//--- 2段階エントリー（装填 → 発火）。既定は無効＝従来どおりの動き
+input bool   InpR1_Staged      = false;  // 2段階エントリー（1回目は装填のみ）を使う
+input int    InpR1_ArmBars     = 42;     // 装填が生きている本数
+input int    InpR1_RsiPeriod   = 14;     // RSI の期間
+input double InpR1_RsiUpper    = 80.0;   // 買いを見送る／買いを決済する RSI
+input double InpR1_RsiLower    = 20.0;   // 売りを見送る／売りを決済する RSI
+
 //--- 診断
 input bool   InpPrintCounters = true;    // 条件別の成立回数を出力する
 input string InpRunTag        = "";      // 実行の識別名（空なら CSV を書かない）
 
-CTrade        g_trade;
-SBRule1Params g_rule1;
-datetime      g_lastBarTime = 0;
-ulong         g_posTicket   = 0;
-int           g_barsHeld    = 0;
-int           g_needBars    = 0;
+CTrade         g_trade;
+SBRule1Params  g_rule1;
+SBStagedParams g_staged;
+SBArmState     g_arm;
+int            g_rsiHandle   = INVALID_HANDLE;
+datetime       g_lastBarTime = 0;
+ulong          g_posTicket   = 0;
+int            g_barsHeld    = 0;
+int            g_needBars    = 0;
 
 //--- 診断カウンタ。各条件は他の条件の成否と無関係に数える
 //    （docs/implementation_design.md §4）
@@ -60,6 +70,11 @@ int g_cntJudged = 0;    // 判定した足数
 int g_cntSqueeze = 0, g_cntLag = 0, g_cntBreak = 0, g_cntExpand = 0;
 int g_cntSignal  = 0, g_cntBuy = 0, g_cntSell = 0;
 int g_cntWidened = 0;   // 損切りを最小距離まで広げた回数
+
+//--- 2段階エントリーの内訳。この案が使いものになるかは、装填が
+//    どれだけ発火・見送り・期限切れに分かれたかで判断する
+int g_cntArmed = 0, g_cntFired = 0, g_cntRsiBlocked = 0, g_cntExpired = 0;
+int g_cntRsiExit = 0;   // RSI が行きすぎで決済した回数
 
 //--- 1取引ぶんの記録。グロス損益はスプレッドを足し戻して求めるので、
 //    建玉時と決済時のスプレッドを両方持つ（値の解釈は集計側で行う）
@@ -118,6 +133,40 @@ int OnInit()
       return INIT_PARAMETERS_INCORRECT;
    }
 
+   if(InpR1_Staged)
+   {
+      if(InpR1_ArmBars < 1)
+      {
+         Print("装填が生きている本数は 1 以上にしてください");
+         return INIT_PARAMETERS_INCORRECT;
+      }
+      if(InpR1_RsiPeriod < 2)
+      {
+         Print("RSI の期間は 2 以上にしてください");
+         return INIT_PARAMETERS_INCORRECT;
+      }
+      if(!(InpR1_RsiLower > 0.0 && InpR1_RsiLower < InpR1_RsiUpper && InpR1_RsiUpper < 100.0))
+      {
+         Print("RSI の閾値は 0 < 売り側 < 買い側 < 100 にしてください");
+         return INIT_PARAMETERS_INCORRECT;
+      }
+
+      g_rsiHandle = iRSI(_Symbol, _Period, InpR1_RsiPeriod, PRICE_CLOSE);
+      if(g_rsiHandle == INVALID_HANDLE)
+      {
+         PrintFormat("RSI を作成できませんでした (error=%d)", GetLastError());
+         return INIT_FAILED;
+      }
+   }
+
+   g_staged.enabled   = InpR1_Staged;
+   g_staged.armBars   = InpR1_ArmBars;
+   g_staged.rsiPeriod = InpR1_RsiPeriod;
+   g_staged.rsiUpper  = InpR1_RsiUpper;
+   g_staged.rsiLower  = InpR1_RsiLower;
+   g_arm.armed        = false;
+   g_arm.age          = 0;
+
    g_rule1.period      = InpR1_Period;
    g_rule1.lagBars     = InpR1_LagBars;
    g_rule1.useSqueeze  = InpR1_UseSqueeze;
@@ -155,6 +204,10 @@ void OnDeinit(const int reason)
 
    WriteCsv();
 
+   if(g_rsiHandle != INVALID_HANDLE)
+      IndicatorRelease(g_rsiHandle);
+   Comment("");
+
    if(!InpPrintCounters)
       return;
 
@@ -167,6 +220,13 @@ void OnDeinit(const int reason)
                g_cntSignal, g_cntBuy, g_cntSell);
    PrintFormat("[ルール1] 損切りを最小距離まで広げた %d", g_cntWidened);
    PrintFormat("[ルール1] 決済の方式: %s", ExitName(InpR1_Exit));
+
+   if(InpR1_Staged)
+   {
+      PrintFormat("[2段階] 装填 %d → 発火 %d / RSIで見送り %d / 期限切れ %d",
+                  g_cntArmed, g_cntFired, g_cntRsiBlocked, g_cntExpired);
+      PrintFormat("[2段階] RSI が行きすぎで決済 %d", g_cntRsiExit);
+   }
 }
 
 //+------------------------------------------------------------------+
@@ -188,6 +248,18 @@ void OnTick()
    if(CopyHigh (_Symbol, _Period, 0, g_needBars, high)  < g_needBars) return;
    if(CopyLow  (_Symbol, _Period, 0, g_needBars, low)   < g_needBars) return;
 
+   // RSI は判定足のぶんだけ要る。ここで取れなければ足ごと見送る。装填の
+   // 経過本数を数える処理より前に返すことで、数え落としが起きないようにする
+   double rsi1 = 0.0;
+   if(InpR1_Staged)
+   {
+      double rsi[];
+      ArraySetAsSeries(rsi, true);
+      if(CopyBuffer(g_rsiHandle, 0, 0, 2, rsi) < 2)
+         return;
+      rsi1 = rsi[1];
+   }
+
    SBRule1Signal s;
    if(!SB_Rule1(close, high, low, 1, g_rule1, s))
       return;
@@ -203,7 +275,29 @@ void OnTick()
       if(s.buy) g_cntBuy++; else g_cntSell++;
    }
 
-   //--- 手仕舞いが先。抜けた足で反対のサインも出ていればドテンになる
+   //--- 発注する足を決める。2段階エントリーが有効なら「発火」、無効なら
+   //    従来どおりサインそのもの
+   bool entryBuy  = s.buy;
+   bool entrySell = s.sell;
+   if(InpR1_Staged)
+   {
+      SBStagedResult stg;
+      SB_StagedStep(s, rsi1, g_staged, g_arm, stg);
+      entryBuy  = stg.fireBuy;
+      entrySell = stg.fireSell;
+
+      if(stg.armedNow)          g_cntArmed++;
+      if(stg.rsiBlocked)        g_cntRsiBlocked++;
+      if(stg.expired)           g_cntExpired++;
+      if(entryBuy || entrySell) g_cntFired++;
+
+      if(g_arm.armed)
+         Comment(StringFormat("装填中（発火まであと %d 本）", InpR1_ArmBars - g_arm.age));
+      else
+         Comment("装填なし");
+   }
+
+   //--- 手仕舞いが先。抜けた足で反対の発注も出ていればドテンになる
    int dir = CurrentPositionDir(g_posTicket);
 
    // 自分の決済以外で建玉が消えていたら（サーバー側の損切りなど）記録を閉じる。
@@ -226,23 +320,31 @@ void OnTick()
             reason = ExitName(InpR1_Exit);
       }
 
+      // 2段階エントリーが有効なときだけ足す OR 条件。買いは RSI が上限
+      // 以上、売りは下限以下で降りる
+      if(reason == "" && InpR1_Staged && SB_RsiExtreme(rsi1, dir > 0, g_staged))
+      {
+         reason = "RSI が行きすぎ";
+         g_cntRsiExit++;
+      }
+
       // ルール1では、反対シグナルが出るころには上の手仕舞いが先に成立して
       // いるのが通常（反対側は①膠着も要求するため）。この分岐が効くのは
       // 例外的な足だけ（docs/implementation_design.md §3）
       if(reason == "" && InpReverseOnOpposite &&
-         ((dir > 0 && s.sell) || (dir < 0 && s.buy)))
+         ((dir > 0 && entrySell) || (dir < 0 && entryBuy)))
          reason = "反対シグナル";
 
       if(reason != "" && ClosePosition(reason))
          dir = 0;
    }
 
-   //--- 建玉は1つまで。保有中に出た同じ向きのサインは無視する
+   //--- 建玉は1つまで。保有中に出た同じ向きの発注は無視する
    if(dir != 0)
       return;
 
-   if(s.buy)  OpenMarket(+1, close);
-   if(s.sell) OpenMarket(-1, close);
+   if(entryBuy)  OpenMarket(+1, close);
+   if(entrySell) OpenMarket(-1, close);
 }
 
 //+------------------------------------------------------------------+
@@ -338,6 +440,16 @@ void WriteCsv()
    FileWrite(fs, "signals_buy",   g_cntBuy);
    FileWrite(fs, "signals_sell",  g_cntSell);
    FileWrite(fs, "sl_widened",    g_cntWidened);
+   FileWrite(fs, "staged",        InpR1_Staged ? 1 : 0);
+   FileWrite(fs, "arm_bars",      InpR1_ArmBars);
+   FileWrite(fs, "rsi_period",    InpR1_RsiPeriod);
+   FileWrite(fs, "rsi_upper",     DoubleToString(InpR1_RsiUpper, 1));
+   FileWrite(fs, "rsi_lower",     DoubleToString(InpR1_RsiLower, 1));
+   FileWrite(fs, "armed",         g_cntArmed);
+   FileWrite(fs, "fired",         g_cntFired);
+   FileWrite(fs, "rsi_blocked",   g_cntRsiBlocked);
+   FileWrite(fs, "arm_expired",   g_cntExpired);
+   FileWrite(fs, "rsi_exits",     g_cntRsiExit);
    FileWrite(fs, "trades",        rows);
    FileClose(fs);
 

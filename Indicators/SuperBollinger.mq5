@@ -19,8 +19,8 @@
 //| 売買条件は docs/trading_rules.md §4.1。                          |
 //+------------------------------------------------------------------+
 #property indicator_chart_window
-#property indicator_buffers 18
-#property indicator_plots   17
+#property indicator_buffers 21
+#property indicator_plots   20
 
 #property indicator_label1  "センターライン"
 #property indicator_type1   DRAW_LINE
@@ -91,6 +91,18 @@
 #property indicator_color17 clrAqua
 #property indicator_width17 5
 
+// 2段階エントリーが有効なときだけ出る。装填は向きを持たないので印は1種類。
+// 装填した足に売買の矢印は出ない（発注していないため）ので位置は競合しない。
+#property indicator_label18 "装填"
+#property indicator_type18  DRAW_ARROW
+#property indicator_color18 clrMediumOrchid
+#property indicator_width18 3
+
+#property indicator_label19 "装填 (1=装填中)"
+#property indicator_type19  DRAW_NONE
+#property indicator_label20 "装填からの本数"
+#property indicator_type20  DRAW_NONE
+
 #include <Signals\SuperBollinger.mqh>
 
 input int    InpPeriod      = 21;    // 期間（センターラインとσ）
@@ -103,13 +115,23 @@ input bool   InpUseExpand   = true;  // ④バンド幅の拡大を条件に入�
 input int    InpExpandBars  = 3;     // ④拡大を見る本数
 input ENUM_SB_EXIT InpExit  = SB_EXIT_CLOSE_SIGMA1;  // 決済の方式
 
+//--- 2段階エントリー（装填 → 発火）。既定は無効＝従来どおりの動き
+input bool   InpStaged      = false;  // 2段階エントリー（1回目は装填のみ）を使う
+input int    InpArmBars     = 42;     // 装填が生きている本数
+input int    InpRsiPeriod   = 14;     // RSI の期間
+input double InpRsiUpper    = 80.0;   // 買いを見送る／買いを決済する RSI
+input double InpRsiLower    = 20.0;   // 売りを見送る／売りを決済する RSI
+
 double BufCenter[], BufU1[], BufL1[], BufU2[], BufL2[], BufU3[], BufL3[], BufLag[];
 double BufBuy[], BufSell[];
 double BufC1[], BufC2[], BufC3[], BufC4[], BufLagZ[];
 double BufExitBuy[], BufExitSell[];
+double BufArm[], BufArmed[], BufArmAge[];
 double BufPos[];   // 各足を処理し終えた時点の建玉（+1 買い / −1 売り / 0 無し）
 
-SBRule1Params g_rule1;
+SBRule1Params  g_rule1;
+SBStagedParams g_staged;
+int            g_rsiHandle = INVALID_HANDLE;
 
 //+------------------------------------------------------------------+
 int OnInit()
@@ -140,6 +162,38 @@ int OnInit()
       return INIT_PARAMETERS_INCORRECT;
    }
 
+   if(InpStaged)
+   {
+      if(InpArmBars < 1)
+      {
+         Print("装填が生きている本数は 1 以上にしてください");
+         return INIT_PARAMETERS_INCORRECT;
+      }
+      if(InpRsiPeriod < 2)
+      {
+         Print("RSI の期間は 2 以上にしてください");
+         return INIT_PARAMETERS_INCORRECT;
+      }
+      if(!(InpRsiLower > 0.0 && InpRsiLower < InpRsiUpper && InpRsiUpper < 100.0))
+      {
+         Print("RSI の閾値は 0 < 売り側 < 買い側 < 100 にしてください");
+         return INIT_PARAMETERS_INCORRECT;
+      }
+
+      g_rsiHandle = iRSI(_Symbol, _Period, InpRsiPeriod, PRICE_CLOSE);
+      if(g_rsiHandle == INVALID_HANDLE)
+      {
+         PrintFormat("RSI を作成できませんでした (error=%d)", GetLastError());
+         return INIT_FAILED;
+      }
+   }
+
+   g_staged.enabled   = InpStaged;
+   g_staged.armBars   = InpArmBars;
+   g_staged.rsiPeriod = InpRsiPeriod;
+   g_staged.rsiUpper  = InpRsiUpper;
+   g_staged.rsiLower  = InpRsiLower;
+
    g_rule1.period      = InpPeriod;
    g_rule1.lagBars     = InpLagBars;
    g_rule1.useSqueeze  = InpUseSqueeze;
@@ -166,9 +220,12 @@ int OnInit()
    SetIndexBuffer(14, BufLagZ,  INDICATOR_DATA);
    SetIndexBuffer(15, BufExitBuy,  INDICATOR_DATA);
    SetIndexBuffer(16, BufExitSell, INDICATOR_DATA);
-   SetIndexBuffer(17, BufPos,      INDICATOR_CALCULATIONS);
+   SetIndexBuffer(17, BufArm,      INDICATOR_DATA);
+   SetIndexBuffer(18, BufArmed,    INDICATOR_DATA);
+   SetIndexBuffer(19, BufArmAge,   INDICATOR_DATA);
+   SetIndexBuffer(20, BufPos,      INDICATOR_CALCULATIONS);
 
-   for(int p = 0; p < 17; p++)
+   for(int p = 0; p < 20; p++)
       PlotIndexSetDouble(p, PLOT_EMPTY_VALUE, EMPTY_VALUE);
 
    // 印は足の外側へ逃がす。安値・高値そのものに描くとローソク足に重なって
@@ -182,11 +239,20 @@ int OnInit()
    PlotIndexSetInteger(15, PLOT_ARROW_SHIFT,  16);
    PlotIndexSetInteger(16, PLOT_ARROW, 251);  // ✗ 売りの決済
    PlotIndexSetInteger(16, PLOT_ARROW_SHIFT, -16);
+   PlotIndexSetInteger(17, PLOT_ARROW, 159);  // ● 装填（向きを持たないので足の上に固定）
+   PlotIndexSetInteger(17, PLOT_ARROW_SHIFT, -16);
 
    IndicatorSetInteger(INDICATOR_DIGITS, _Digits);
    IndicatorSetString(INDICATOR_SHORTNAME,
                       StringFormat("スーパーボリンジャー(%d, 遅行%d)", InpPeriod, InpLagBars));
    return INIT_SUCCEEDED;
+}
+
+//+------------------------------------------------------------------+
+void OnDeinit(const int reason)
+{
+   if(g_rsiHandle != INVALID_HANDLE)
+      IndicatorRelease(g_rsiHandle);
 }
 
 //+------------------------------------------------------------------+
@@ -229,6 +295,9 @@ int OnCalculate(const int rates_total,
    ArraySetAsSeries(BufLagZ,   true);
    ArraySetAsSeries(BufExitBuy,  true);
    ArraySetAsSeries(BufExitSell, true);
+   ArraySetAsSeries(BufArm,      true);
+   ArraySetAsSeries(BufArmed,    true);
+   ArraySetAsSeries(BufArmAge,   true);
    ArraySetAsSeries(BufPos,      true);
 
    // 初回は全ての足を走査する。計算に必要な本数が揃わない最も古い側にも
@@ -250,8 +319,25 @@ int OnCalculate(const int rates_total,
    // から回るので、そのまま時系列順に建玉を持ち越せる。差分更新のときは1本
    // 古い足の状態を引き継ぐ（前回の計算で BufPos に残っている）。
    int pos = 0;
+   SBArmState arm;
+   arm.armed = false;
+   arm.age   = 0;
    if(limit + 1 <= rates_total - 1)
-      pos = (int)BufPos[limit + 1];
+   {
+      pos       = (int)BufPos[limit + 1];
+      arm.armed = (BufArmed[limit + 1] > 0.5);
+      arm.age   = (int)BufArmAge[limit + 1];
+   }
+
+   // RSI は2段階エントリーのときだけ要る。無効なら一切触らないので、
+   // RSI がまだ計算できない場面でも従来どおり線とサインが描かれる。
+   double rsi[];
+   if(InpStaged)
+   {
+      ArraySetAsSeries(rsi, true);
+      if(CopyBuffer(g_rsiHandle, 0, 0, limit + 1, rsi) < limit + 1)
+         return 0;   // まだ揃っていない。次のティックで全て計算し直す
+   }
 
    for(int i = limit; i >= 0; i--)
    {
@@ -293,6 +379,7 @@ int OnCalculate(const int rates_total,
       BufC3[i]   = EMPTY_VALUE;
       BufC4[i]   = EMPTY_VALUE;
       BufLagZ[i] = EMPTY_VALUE;
+      BufArm[i]  = EMPTY_VALUE;
       if(i >= 1)
       {
          SBRule1Signal s;
@@ -308,12 +395,41 @@ int OnCalculate(const int rates_total,
          if(SB_LagOffset(close, i, InpLagBars, InpPeriod, z))
             BufLagZ[i] = z;
 
-         // 手仕舞いが先。同じ足で決済と反対のサインが揃えばドテンになる
+         // 発注する足を決める。2段階エントリーが有効なら「発火」、
+         // 無効なら従来どおりサインそのもの
+         bool entryBuy  = false;
+         bool entrySell = false;
+         if(haveSignal)
+         {
+            if(InpStaged)
+            {
+               SBStagedResult stg;
+               SB_StagedStep(s, rsi[i], g_staged, arm, stg);
+               entryBuy  = stg.fireBuy;
+               entrySell = stg.fireSell;
+               if(stg.armedNow)
+                  BufArm[i] = high[i];
+            }
+            else
+            {
+               entryBuy  = s.buy;
+               entrySell = s.sell;
+            }
+         }
+
+         // 手仕舞いが先。同じ足で決済と反対の発注が揃えばドテンになる
          if(pos != 0)
          {
             const bool wasLong = (pos > 0);
-            bool doExit;
-            if(SB_Rule1Exit(close, i, InpPeriod, InpLagBars, InpExit, wasLong, doExit) && doExit)
+            bool doExit = false;
+            bool hit = SB_Rule1Exit(close, i, InpPeriod, InpLagBars, InpExit, wasLong, doExit) && doExit;
+
+            // 2段階エントリーが有効なときだけ足す OR 条件。買いは RSI が
+            // 上限以上、売りは下限以下で降りる
+            if(!hit && InpStaged && SB_RsiExtreme(rsi[i], wasLong, g_staged))
+               hit = true;
+
+            if(hit)
             {
                if(wasLong) BufExitBuy[i]  = low[i];
                else        BufExitSell[i] = high[i];
@@ -321,15 +437,17 @@ int OnCalculate(const int rates_total,
             }
          }
 
-         // 建玉は1つまで。保有中に出た同じ向きのサインは矢印を出さない
+         // 建玉は1つまで。保有中に出た同じ向きの発注は矢印を出さない
          // （EA も無視するため。条件が揃ったかどうかは上の①②③④で読む）
-         if(pos == 0 && haveSignal)
+         if(pos == 0)
          {
-            if(s.buy)  { BufBuy[i]  = low[i];  pos =  1; }
-            if(s.sell) { BufSell[i] = high[i]; pos = -1; }
+            if(entryBuy)  { BufBuy[i]  = low[i];  pos =  1; }
+            if(entrySell) { BufSell[i] = high[i]; pos = -1; }
          }
       }
-      BufPos[i] = pos;
+      BufArmed[i]  = arm.armed ? 1.0 : 0.0;
+      BufArmAge[i] = arm.armed ? (double)arm.age : 0.0;
+      BufPos[i]    = pos;
    }
 
    return rates_total;
