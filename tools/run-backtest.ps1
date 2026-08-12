@@ -7,6 +7,11 @@
 # ないため、起動中だと新しい設定が無視されて既存のウィンドウが前面に出る
 # だけになる。走らせたつもりで何も起きない状態になるので、ここで弾く。
 #
+# **売買結果を変える入力は全部 [TesterInputs] に書く。** 書かなかった入力は
+# ソースの初期値ではなく、**テスターが前回使った値**を引き継ぐ。手で最適化を
+# 回した後などに前の設定が残り、気づかないまま別条件で走る（2026-08-12 に
+# ④拡大の本数が 8 のまま引き継がれ、取引数が 2104 → 1918 とずれた）。
+#
 # 結果は EA 自身が共有フォルダへ CSV で書く（r1_<Tag>_trades.csv /
 # _summary.csv）。テスターの標準レポートは口座通貨での純損益しか出さず、
 # 判定に使うスプレッド抜きのグロス損益が取れないため。
@@ -22,12 +27,22 @@ param(
     [string]$Symbol   = 'USDJPY#',
     [string]$Period   = 'M5',
     [int]$Exit        = 0,                        # 決済の方式 0=A 1=B 2=C
-    [int]$UseSqueeze  = 1,                        # ①膠着を条件に入れる 0=入れない 1=入れる
+    [int]$Period_     = 21,                       # 期間（センターラインとσ）
+    [int]$LagBars     = 21,                       # 遅行線の本数
+    [int]$UseSqueeze  = 1,                        # ①膠着を条件に入れる
     [int]$SqueezeBars = 21,                       # ①膠着とみなす本数
+    [double]$SigmaMult = 3.0,                     # ①③で使うσの倍数
+    [int]$UseExpand   = 1,                        # ④バンド幅の拡大を条件に入れる
     [int]$ExpandBars  = 3,                        # ④拡大を見る本数
+    [int]$UseSL       = 0,                        # 損切りを使う
+    [double]$SLSigma  = 2.0,                      # 損切り（σの何倍）
+    [int]$UseTimeStop = 0,                        # 保有本数で手仕舞う
+    [int]$HoldBars    = 24,                       # 手仕舞うまでの本数
+    [int]$Reverse     = 1,                        # 反対シグナルでドテンする
+    [double]$Lots     = 0.10,                     # ロット
     [int]$StagedMode  = 0,                        # 段階エントリー 0=使わない 1=装填1のみ 2=装填1+装填2
     [double]$RsiUpper = 80,                       # 買いの発火を見送る RSI
-    [double]$RsiLower = 20,                       # 売りを見送る RSI
+    [double]$RsiLower = 20,                       # 売りの発火を見送る RSI
     [int]$Model       = 2,                        # 2=始値のみ（本 EA は足の始値でしか売買しないため過不足なし）
     [int]$TimeoutMin  = 120,
     [int]$WaitFreeSec = 90,                       # 同じ端末が空くまで待つ秒数
@@ -80,10 +95,20 @@ ShutdownTerminal=1
 Visual=0
 
 [TesterInputs]
-InpR1_Exit=$Exit
+InpLots=$Lots
+InpReverseOnOpposite=$Reverse
+InpR1_Period=$Period_
+InpR1_LagBars=$LagBars
 InpR1_UseSqueeze=$UseSqueeze
 InpR1_SqueezeBars=$SqueezeBars
+InpR1_SigmaMult=$SigmaMult
+InpR1_UseExpand=$UseExpand
 InpR1_ExpandBars=$ExpandBars
+InpR1_Exit=$Exit
+InpR1_UseSL=$UseSL
+InpR1_SLSigma=$SLSigma
+InpR1_UseTimeStop=$UseTimeStop
+InpR1_HoldBars=$HoldBars
 InpR1_StagedMode=$StagedMode
 InpR1_RsiUpper=$RsiUpper
 InpR1_RsiLower=$RsiLower
@@ -93,24 +118,39 @@ InpRunTag=$Tag
 Write-Host "設定: $ini"
 Write-Host "実行: $Symbol $Period  $From 〜 $To  決済方式=$Exit  段階=$StagedMode  RSI=$RsiUpper/$RsiLower  識別名=$Tag"
 
-$before = @(Get-ChildItem $common -Filter "r1_${Tag}_*" -ErrorAction SilentlyContinue).Count
+$beforeTrades  = @(Get-ChildItem $common -Filter "r1_${Tag}_trades*.csv"  -ErrorAction SilentlyContinue).Count
+$beforeSummary = @(Get-ChildItem $common -Filter "r1_${Tag}_summary*.csv" -ErrorAction SilentlyContinue).Count
 $sw = [System.Diagnostics.Stopwatch]::StartNew()
 
-$proc = Start-Process -FilePath $Terminal -ArgumentList "/config:$ini" -PassThru
+# 設定ファイルのパスは引用する。%TEMP% にユーザー名が入るため、名前に
+# 空白があると引数が途中で切れる。MT5 の仕様上も、空白を含むパスは
+# 引用が必要（/config: と本体の間に空白は入れない）
+$proc = Start-Process -FilePath $Terminal -ArgumentList "/config:`"$ini`"" -PassThru
 $exited = $proc.WaitForExit($TimeoutMin * 60 * 1000)
 $sw.Stop()
 
 if (-not $exited) {
-    Write-Warning "$TimeoutMin 分で終わりませんでした。MT5 は起動したままです。"
+    # 起動したままにすると、次回以降が冒頭の起動中チェックで全部失敗する。
+    # 自分が起動したプロセスだけを、Id 指定で確実に終わらせる
+    Write-Warning "$TimeoutMin 分で終わりませんでした。起動した MT5 (PID $($proc.Id)) を終了します。"
+    try {
+        Stop-Process -Id $proc.Id -Force -ErrorAction Stop
+        $proc.WaitForExit(30 * 1000) | Out-Null
+    }
+    catch { Write-Warning "MT5 (PID $($proc.Id)) を終了できませんでした: $($_.Exception.Message)" }
     exit 1
 }
 
 Write-Host ("終了まで {0:N1} 分" -f $sw.Elapsed.TotalMinutes)
 
-$after = @(Get-ChildItem $common -Filter "r1_${Tag}_*" -ErrorAction SilentlyContinue)
-if ($after.Count -le $before) {
-    Write-Error "CSV が増えていません。EA が起動していないか、途中で失敗しています。テスターのログを確認してください。"
+# trades と summary は EA が別々に開いて書くので、片方だけ失敗しうる。
+# 両方が増えたことを確かめないと、欠けたまま成功として扱ってしまう
+$afterTrades  = @(Get-ChildItem $common -Filter "r1_${Tag}_trades*.csv"  -ErrorAction SilentlyContinue)
+$afterSummary = @(Get-ChildItem $common -Filter "r1_${Tag}_summary*.csv" -ErrorAction SilentlyContinue)
+if ($afterTrades.Count -le $beforeTrades -or $afterSummary.Count -le $beforeSummary) {
+    Write-Error ("CSV が揃っていません（trades {0}→{1} / summary {2}→{3}）。EA が起動していないか、途中で失敗しています。テスターのログを確認してください。" -f
+                 $beforeTrades, $afterTrades.Count, $beforeSummary, $afterSummary.Count)
 }
 
-$after | Sort-Object LastWriteTime -Descending | Select-Object -First 2 |
+$afterTrades + $afterSummary | Sort-Object LastWriteTime -Descending | Select-Object -First 2 |
     ForEach-Object { Write-Host ("出力: {0}  ({1:N0} バイト)" -f $_.FullName, $_.Length) }
