@@ -41,6 +41,8 @@ param(
     [int]$Reverse     = 1,                        # 反対シグナルでドテンする
     [double]$Lots     = 0.10,                     # ロット
     [int]$StagedMode  = 0,                        # 段階エントリー 0=使わない 1=装填1のみ 2=装填1+装填2
+    [int]$ArmBars     = 42,                       # 装填が生きている本数
+    [int]$RsiPeriod   = 14,                       # RSI の期間
     [double]$RsiUpper = 80,                       # 買いの発火を見送る RSI
     [double]$RsiLower = 20,                       # 売りの発火を見送る RSI
     [int]$Model       = 2,                        # 2=始値のみ（本 EA は足の始値でしか売買しないため過不足なし）
@@ -110,6 +112,8 @@ InpR1_SLSigma=$SLSigma
 InpR1_UseTimeStop=$UseTimeStop
 InpR1_HoldBars=$HoldBars
 InpR1_StagedMode=$StagedMode
+InpR1_ArmBars=$ArmBars
+InpR1_RsiPeriod=$RsiPeriod
 InpR1_RsiUpper=$RsiUpper
 InpR1_RsiLower=$RsiLower
 InpRunTag=$Tag

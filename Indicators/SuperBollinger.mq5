@@ -135,7 +135,7 @@ double BufPos[];    // 各足を処理し終えた時点の建玉（+1 買い / 
 SBRule1Params  g_rule1;
 SBStagedParams g_staged;
 int            g_rsiHandle = INVALID_HANDLE;
-bool           g_needRsi   = false;   // 入口の見送りか決済か、どちらかで RSI を使う
+bool           g_needRsi   = false;   // 段階エントリーの発火を見送るかの判定に RSI を使う
 
 //+------------------------------------------------------------------+
 int OnInit()

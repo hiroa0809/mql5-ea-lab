@@ -27,9 +27,13 @@ function Read-Summary([string]$path) {
 $rows = @()
 
 foreach ($pat in $Pattern) {
-    foreach ($f in Get-ChildItem $Common -Filter "r1_${pat}_summary.csv" -ErrorAction SilentlyContinue) {
-        $tag = $f.Name -replace '^r1_', '' -replace '_summary\.csv$', ''
-        $tradesPath = Join-Path $Common "r1_${tag}_trades.csv"
+    # EA は同じ識別名で再実行すると _001 のような連番を付ける。連番なしだけを
+    # 読むと、回し直しても古い結果を見続けることになる。summary と trades は
+    # **同じ連番どうしで組にする**
+    foreach ($f in Get-ChildItem $Common -Filter "r1_${pat}_summary*.csv" -ErrorAction SilentlyContinue) {
+        if ($f.Name -notmatch '^r1_(?<tag>.+?)_summary(?<seq>_\d+)?\.csv$') { continue }
+        $tag = $Matches['tag'] + $Matches['seq']
+        $tradesPath = Join-Path $Common ("r1_{0}_trades{1}.csv" -f $Matches['tag'], $Matches['seq'])
         if (-not (Test-Path $tradesPath)) { continue }
 
         $s = Read-Summary $f.FullName

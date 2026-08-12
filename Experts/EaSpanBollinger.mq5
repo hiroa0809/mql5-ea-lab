@@ -62,7 +62,7 @@ SBRule1Params  g_rule1;
 SBStagedParams g_staged;
 SBArmState     g_arm;
 int            g_rsiHandle   = INVALID_HANDLE;
-bool           g_needRsi     = false;   // 入口の見送りか決済か、どちらかで RSI を使う
+bool           g_needRsi     = false;   // 段階エントリーの発火を見送るかの判定に RSI を使う
 datetime       g_lastBarTime = 0;
 ulong          g_posTicket   = 0;
 int            g_barsHeld    = 0;
