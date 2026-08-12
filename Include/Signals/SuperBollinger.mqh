@@ -103,7 +103,7 @@ bool SB_Calc(const double &close[], const int shift, const int period, SBValues 
 //| 最新足まで伸びていたら逆向き（正しくは lagBars 本手前で切れる）。|
 //|                                                                  |
 //| 判定に使う「陽転／陰転」は現在の終値と過去の高値・安値を比べる   |
-//| 別の形になる。そちらは N5-1 で追加する。                         |
+//| 別の形になる。そちらは下の SB_Rule1 が持つ。                     |
 //+------------------------------------------------------------------+
 bool SB_LagValue(const double &close[], const int shift, const int lagBars, double &out)
 {
@@ -123,6 +123,202 @@ bool SB_LagValue(const double &close[], const int shift, const int lagBars, doub
 int SB_RequiredBars(const int period, const int lagBars, const int squeezeBars, const int expandBars)
 {
    return period + lagBars + MathMax(squeezeBars, expandBars) + 2;
+}
+
+//+------------------------------------------------------------------+
+//| ルール1（トレンド開始）の入力                                    |
+//|                                                                  |
+//| インジケーターと EA が同じ判定を使うため、条件の ON/OFF まで含め |
+//| てここへ集める。③（遅行スパンの帯突破）だけ ON/OFF が無いのは、 |
+//| これが引き金であり外すとルールが成立しないため。                 |
+//| 出典: docs/implementation_design.md §2                           |
+//+------------------------------------------------------------------+
+struct SBRule1Params
+{
+   int    period;        // センターラインとσの期間
+   int    lagBars;       // 遅行線の本数
+   bool   useSqueeze;    // ①膠着を条件に入れる
+   int    squeezeBars;   // ①膠着とみなす本数
+   double sigmaMult;     // ①③で使うσの倍数
+   bool   useLag;        // ②遅行線の陽転/陰転を条件に入れる
+   bool   useExpand;     // ④バンド幅の拡大を条件に入れる
+   int    expandBars;    // ④拡大を見る本数
+};
+
+//+------------------------------------------------------------------+
+//| ルール1の判定結果                                                |
+//|                                                                  |
+//| 4条件は「使う」設定に関係なく必ず埋める。診断出力が条件ごとの    |
+//| 成立回数を他の条件の成否と無関係に数えるため                     |
+//| （docs/implementation_design.md §4）。ON/OFF を反映した最終判定  |
+//| は buy / sell だけ。                                             |
+//+------------------------------------------------------------------+
+struct SBRule1Signal
+{
+   bool squeezed;      // ①遅行スパンが帯の内側にとどまっていた
+   bool lagAbove;      // ②遅行線が直近の高値を全て上回っている（買い側）
+   bool lagBelow;      // ②遅行線が直近の安値を全て下回っている（売り側）
+   bool crossUp;       // ③遅行スパンが帯を上へ突破した（買いの引き金）
+   bool crossDown;     // ③遅行スパンが帯を下へ突破した（売りの引き金）
+   bool expanding;     // ④バンド幅が拡大している
+   bool buy;           // 使う条件がすべて揃った（買い）
+   bool sell;          // 同（売り）
+};
+
+//+------------------------------------------------------------------+
+//| 遅行スパンが帯のどこにいるか — σ 何個ぶん中心線から離れているか  |
+//|                                                                  |
+//| 遅行線は「今の終値を lagBars 本前の位置へ置いた線」なので、その  |
+//| 点の真下にある帯は lagBars 本前の時点で計算された帯になる。      |
+//| したがって比べる相手は cur ではなく SB_Calc(shift + lagBars)。   |
+//|                                                                  |
+//| 戻す値の意味: +1.0 なら遅行スパンが +1σ の線の上に乗っている。   |
+//| 21本かけて価格が正味どこへ行ったかを、当時のσで割った量になる。 |
+//|                                                                  |
+//| σ が 0（21本の終値が全て同値）のときは 0 を返す。動いていない   |
+//| のだから帯の内側と扱うのが自然で、割り算も避けられる。           |
+//+------------------------------------------------------------------+
+bool SB_LagOffset(const double &close[], const int shift, const int lagBars,
+                  const int period, double &out)
+{
+   SBValues v;
+   if(!SB_Calc(close, shift + lagBars, period, v)) return false;
+   out = (v.sigma > 0.0) ? (close[shift] - v.center) / v.sigma : 0.0;
+   return true;
+}
+
+//+------------------------------------------------------------------+
+//| ルール1 — トレンド開始の4条件を判定する                          |
+//|                                                                  |
+//| 条件の定義は docs/trading_rules.md §3（用語の一意化）と §4.1     |
+//| （エントリー）。本関数は資料の条件番号 ①②③④ をそのまま持つ。 |
+//|                                                                  |
+//| 終値・高値・安値の3配列とも時系列順（添字 0 = 最新足）が前提。   |
+//| 呼ぶ側が ArraySetAsSeries を済ませること。                       |
+//|                                                                  |
+//| 戻り値 false は「判定できない」。履歴が足りない場合などで、この  |
+//| とき out の中身は不定。**戻り値を確認せずに out を読まないこと。**|
+//+------------------------------------------------------------------+
+bool SB_Rule1(const double &close[], const double &high[], const double &low[],
+              const int shift, const SBRule1Params &p, SBRule1Signal &out)
+{
+   if(shift < 0 || p.period < 2 || p.sigmaMult <= 0.0)        return false;
+   if(p.lagBars < 1 || p.squeezeBars < 1 || p.expandBars < 1) return false;
+
+   // ②だけは高値・安値を直接引くので、ここで長さを見る。終値配列の
+   // 不足は SB_Calc が各所で弾くため、同じ計算をここで持たない。
+   const int lagIdx = shift + p.lagBars;
+   if(ArraySize(high) <= lagIdx || ArraySize(low) <= lagIdx) return false;
+
+   // ① 膠着 — 遅行スパンが直前 squeezeBars 本ぶん ±sigmaMult σ の内側に
+   // とどまっていた。「21本かけて価格が正味どこへも行っていない」状態を
+   // 見ており、帯が細いかどうかは見ていない。判定足そのものは含めない
+   // （p11-① は「直前が」膠着）。docs/trading_rules.md §3.3
+   out.squeezed = true;
+   for(int j = shift + 1; j <= shift + p.squeezeBars; j++)
+   {
+      double z;
+      if(!SB_LagOffset(close, j, p.lagBars, p.period, z)) return false;
+      if(MathAbs(z) > p.sigmaMult)
+      {
+         out.squeezed = false;
+         break;
+      }
+   }
+
+   // ② 遅行線の陽転・陰転 — 遅行線の右端が、そこから判定足の手前までの
+   // ローソク足の山を一つ残らず上回っている（谷を一つ残らず下回っている）。
+   // 判定足は含めない（自分の高値は終値より必ず上で、必ず不成立になる）。
+   // docs/trading_rules.md §3.1
+   double hh = high[shift + 1];
+   double ll = low[shift + 1];
+   for(int k = shift + 2; k <= lagIdx; k++)
+   {
+      if(high[k] > hh) hh = high[k];
+      if(low[k]  < ll) ll = low[k];
+   }
+   out.lagAbove = (close[shift] > hh);
+   out.lagBelow = (close[shift] < ll);
+
+   // ③ 遅行スパンが帯を突破（引き金）— 状態ではなく遷移として扱う。前の
+   // 足では内側にいたことまで要求する。①を外した設定でも、外に居続ける
+   // 間ずっと発火し続けることがない。docs/trading_rules.md §3.3
+   double zNow, zPrev;
+   if(!SB_LagOffset(close, shift,     p.lagBars, p.period, zNow))  return false;
+   if(!SB_LagOffset(close, shift + 1, p.lagBars, p.period, zPrev)) return false;
+   out.crossUp   = (zNow >  p.sigmaMult) && (zPrev <=  p.sigmaMult);
+   out.crossDown = (zNow < -p.sigmaMult) && (zPrev >= -p.sigmaMult);
+
+   // ④ バンド幅の拡大 — バンド幅は σ の2倍なので、σ どうしの比較と同値。
+   // 1本前と比べるとノイズで成立するため既定は3本前。
+   // docs/trading_rules.md §3.2
+   SBValues cur, past;
+   if(!SB_Calc(close, shift,                p.period, cur))  return false;
+   if(!SB_Calc(close, shift + p.expandBars, p.period, past)) return false;
+   out.expanding = (cur.sigma > past.sigma);
+
+   out.buy  = out.crossUp   && (!p.useSqueeze || out.squeezed)
+                            && (!p.useLag     || out.lagAbove)
+                            && (!p.useExpand  || out.expanding);
+   out.sell = out.crossDown && (!p.useSqueeze || out.squeezed)
+                            && (!p.useLag     || out.lagBelow)
+                            && (!p.useExpand  || out.expanding);
+   return true;
+}
+
+//+------------------------------------------------------------------+
+//| ルール1の手仕舞い方式                                            |
+//|                                                                  |
+//| A は資料 p13 のとおり。B と C は【一意化】で、エントリーと同じ   |
+//| 物差し（遅行スパンと帯の距離）を使う。                           |
+//|                                                                  |
+//| A を分けてある理由: エントリーは④で「バンド幅が拡大している」   |
+//| ことを要求するので、発火を起こした値動きがそのまま今のσを膨らま |
+//| せる。A は「今の帯」を基準にするため、**エントリーの勢いが強い   |
+//| ほど決済のハードルが下がる**。B・C にはこの反応が無い。          |
+//|                                                                  |
+//| どれが良いかは学習期間の平均グロス損益で決める（回数制限なし）。 |
+//+------------------------------------------------------------------+
+enum ENUM_SB_EXIT
+{
+   SB_EXIT_CLOSE_SIGMA1 = 0,   // A 終値が 1σ の内側へ戻る（資料 p13）
+   SB_EXIT_LAG_SIGMA1   = 1,   // B 遅行スパンが 1σ の内側へ戻る
+   SB_EXIT_LAG_FLIP     = 2    // C 遅行スパンが反対側へ陰転する
+};
+
+//+------------------------------------------------------------------+
+//| ルール1の手仕舞い — 抜けるべき足かどうか                         |
+//|                                                                  |
+//| エントリー側（③）が遷移なのに対し、こちらは**状態**として扱う。 |
+//| 保有中に毎足チェックする条件なので、遷移として書くと取り逃した   |
+//| とき決済されないまま走り続ける。docs/trading_rules.md §3.3b・§4.2|
+//|                                                                  |
+//| A について: p13 は「バンド幅が収束傾向」「遅行スパンが絡む」も   |
+//| 併記しているが、3つ揃うのを待つと調整が進んだ後の決済になる。    |
+//|                                                                  |
+//| B の 1σ は固定。つまみにすると学習期間の成績が実力以上に出る。   |
+//+------------------------------------------------------------------+
+bool SB_Rule1Exit(const double &close[], const int shift, const int period,
+                  const int lagBars, const ENUM_SB_EXIT method,
+                  const bool isLong, bool &out)
+{
+   if(method == SB_EXIT_CLOSE_SIGMA1)
+   {
+      SBValues v;
+      if(!SB_Calc(close, shift, period, v)) return false;
+      out = isLong ? (close[shift] < v.upper1) : (close[shift] > v.lower1);
+      return true;
+   }
+
+   double z;
+   if(!SB_LagOffset(close, shift, lagBars, period, z)) return false;
+
+   if(method == SB_EXIT_LAG_SIGMA1)
+      out = isLong ? (z <= 1.0) : (z >= -1.0);
+   else
+      out = isLong ? (z < 0.0) : (z > 0.0);
+
+   return true;
 }
 
 #endif // SUPERBOLLINGER_MQH
