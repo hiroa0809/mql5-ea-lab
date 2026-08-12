@@ -34,7 +34,6 @@ input int    InpR1_LagBars     = 21;     // 遅行線の本数
 input bool   InpR1_UseSqueeze  = true;   // ①膠着を条件に入れる
 input int    InpR1_SqueezeBars = 21;     // ①膠着とみなす本数（この本数ぶん帯の内側）
 input double InpR1_SigmaMult   = 3.0;    // ①③で使うσの倍数
-input bool   InpR1_UseLag      = true;   // ②遅行線の陽転/陰転を条件に入れる
 input bool   InpR1_UseExpand   = true;   // ④バンド幅の拡大を条件に入れる
 input int    InpR1_ExpandBars  = 3;      // ④拡大を見る本数
 input ENUM_SB_EXIT InpR1_Exit  = SB_EXIT_CLOSE_SIGMA1;  // 決済の方式
@@ -46,7 +45,6 @@ input int    InpR1_HoldBars    = 24;     // 手仕舞うまでの本数
 //--- 段階エントリー。既定は「使わない」＝従来どおりの動き
 input ENUM_SB_STAGED InpR1_StagedMode = SB_STAGED_OFF;  // 段階エントリー
 input int    InpR1_ArmBars     = 42;     // 装填が生きている本数（装填1 から数える）
-input bool   InpR1_UseRsiExit  = false;  // RSI が行きすぎたら決済する（段階エントリーとは独立）
 input int    InpR1_RsiPeriod   = 14;     // RSI の期間
 input double InpR1_RsiUpper    = 80.0;   // 買いを見送る／買いを決済する RSI
 input double InpR1_RsiLower    = 20.0;   // 売りを見送る／売りを決済する RSI
@@ -69,7 +67,7 @@ int            g_needBars    = 0;
 //--- 診断カウンタ。各条件は他の条件の成否と無関係に数える
 //    （docs/implementation_design.md §4）
 int g_cntJudged = 0;    // 判定した足数
-int g_cntSqueeze = 0, g_cntLag = 0, g_cntBreak = 0, g_cntExpand = 0;
+int g_cntSqueeze = 0, g_cntBreak = 0, g_cntExpand = 0;
 int g_cntSignal  = 0, g_cntBuy = 0, g_cntSell = 0;
 int g_cntWidened = 0;   // 損切りを最小距離まで広げた回数
 
@@ -77,7 +75,6 @@ int g_cntWidened = 0;   // 損切りを最小距離まで広げた回数
 //    装填2・発火まで進んだか（どこで落ちたか）で判断する
 int g_cntArm1 = 0, g_cntArm2 = 0, g_cntFired = 0;
 int g_cntRsiBlocked = 0, g_cntExpired = 0;
-int g_cntRsiExit = 0;   // RSI が行きすぎで決済した回数
 
 //--- 1取引ぶんの記録。グロス損益はスプレッドを足し戻して求めるので、
 //    建玉時と決済時のスプレッドを両方持つ（値の解釈は集計側で行う）
@@ -136,7 +133,7 @@ int OnInit()
       return INIT_PARAMETERS_INCORRECT;
    }
 
-   g_needRsi = (InpR1_StagedMode != SB_STAGED_OFF) || InpR1_UseRsiExit;
+   g_needRsi = (InpR1_StagedMode != SB_STAGED_OFF);
 
    if(InpR1_StagedMode != SB_STAGED_OFF && InpR1_ArmBars < 1)
    {
@@ -178,7 +175,6 @@ int OnInit()
    g_rule1.useSqueeze  = InpR1_UseSqueeze;
    g_rule1.squeezeBars = InpR1_SqueezeBars;
    g_rule1.sigmaMult   = InpR1_SigmaMult;
-   g_rule1.useLag      = InpR1_UseLag;
    g_rule1.useExpand   = InpR1_UseExpand;
    g_rule1.expandBars  = InpR1_ExpandBars;
 
@@ -220,9 +216,9 @@ void OnDeinit(const int reason)
    // 取引ゼロで終わったときに、どの条件で止まったかを切り分けるため。
    // 各条件は単独で数えているので、他の条件の成否に影響されない。
    PrintFormat("[ルール1] 判定した足 %d", g_cntJudged);
-   PrintFormat("[ルール1] ①膠着 %d / ②遅行線 %d / ③3σ突破 %d / ④拡大 %d",
-               g_cntSqueeze, g_cntLag, g_cntBreak, g_cntExpand);
-   PrintFormat("[ルール1] 4つ揃った %d   買い %d / 売り %d",
+   PrintFormat("[ルール1] ①膠着 %d / ③3σ突破 %d / ④拡大 %d",
+               g_cntSqueeze, g_cntBreak, g_cntExpand);
+   PrintFormat("[ルール1] 3つ揃った %d   買い %d / 売り %d",
                g_cntSignal, g_cntBuy, g_cntSell);
    PrintFormat("[ルール1] 損切りを最小距離まで広げた %d", g_cntWidened);
    PrintFormat("[ルール1] 決済の方式: %s", ExitName(InpR1_Exit));
@@ -233,8 +229,6 @@ void OnDeinit(const int reason)
       PrintFormat("[段階] 装填1 %d → 装填2 %d → 発火 %d", g_cntArm1, g_cntArm2, g_cntFired);
       PrintFormat("[段階] RSIで見送り %d / 期限切れ %d", g_cntRsiBlocked, g_cntExpired);
    }
-   if(InpR1_UseRsiExit)
-      PrintFormat("[RSI決済] RSI が行きすぎで決済 %d", g_cntRsiExit);
 }
 
 //+------------------------------------------------------------------+
@@ -269,12 +263,11 @@ void OnTick()
    }
 
    SBRule1Signal s;
-   if(!SB_Rule1(close, high, low, 1, g_rule1, s))
+   if(!SB_Rule1(close, 1, g_rule1, s))
       return;
 
    g_cntJudged++;
    if(s.squeezed)                 g_cntSqueeze++;
-   if(s.lagAbove || s.lagBelow)   g_cntLag++;
    if(s.crossUp  || s.crossDown)  g_cntBreak++;
    if(s.expanding)                g_cntExpand++;
    if(s.buy || s.sell)
@@ -338,15 +331,6 @@ void OnTick()
          bool hit;
          if(SB_Rule1Exit(close, 1, InpR1_Period, InpR1_LagBars, InpR1_Exit, dir > 0, hit) && hit)
             reason = ExitName(InpR1_Exit);
-      }
-
-      // 独立した OR 条件。買いは RSI が上限以上、売りは下限以下で降りる。
-      // 段階エントリーとは別スイッチにしてある。同じスイッチにすると
-      // 「入口の段階化」と「早期決済」のどちらが効いたのか分離できない
-      if(reason == "" && InpR1_UseRsiExit && SB_RsiExtreme(rsi1, dir > 0, g_staged))
-      {
-         reason = "RSI が行きすぎ";
-         g_cntRsiExit++;
       }
 
       // ルール1では、反対シグナルが出るころには上の手仕舞いが先に成立して
@@ -449,12 +433,10 @@ void WriteCsv()
    FileWrite(fs, "sigma_mult",    DoubleToString(InpR1_SigmaMult, 2));
    FileWrite(fs, "expand_bars",   InpR1_ExpandBars);
    FileWrite(fs, "use_squeeze",   InpR1_UseSqueeze ? 1 : 0);
-   FileWrite(fs, "use_lag",       InpR1_UseLag ? 1 : 0);
    FileWrite(fs, "use_expand",    InpR1_UseExpand ? 1 : 0);
    FileWrite(fs, "use_sl",        InpR1_UseSL ? 1 : 0);
    FileWrite(fs, "judged_bars",   g_cntJudged);
    FileWrite(fs, "cond1_squeeze", g_cntSqueeze);
-   FileWrite(fs, "cond2_lag",     g_cntLag);
    FileWrite(fs, "cond3_break",   g_cntBreak);
    FileWrite(fs, "cond4_expand",  g_cntExpand);
    FileWrite(fs, "signals",       g_cntSignal);
@@ -463,7 +445,6 @@ void WriteCsv()
    FileWrite(fs, "sl_widened",    g_cntWidened);
    FileWrite(fs, "staged_mode",   (int)InpR1_StagedMode);
    FileWrite(fs, "staged_name",   StagedName(InpR1_StagedMode));
-   FileWrite(fs, "use_rsi_exit",  InpR1_UseRsiExit ? 1 : 0);
    FileWrite(fs, "arm_bars",      InpR1_ArmBars);
    FileWrite(fs, "rsi_period",    InpR1_RsiPeriod);
    FileWrite(fs, "rsi_upper",     DoubleToString(InpR1_RsiUpper, 1));
@@ -473,7 +454,6 @@ void WriteCsv()
    FileWrite(fs, "fired",         g_cntFired);
    FileWrite(fs, "rsi_blocked",   g_cntRsiBlocked);
    FileWrite(fs, "arm_expired",   g_cntExpired);
-   FileWrite(fs, "rsi_exits",     g_cntRsiExit);
    FileWrite(fs, "trades",        rows);
    FileClose(fs);
 

@@ -140,7 +140,6 @@ struct SBRule1Params
    bool   useSqueeze;    // ①膠着を条件に入れる
    int    squeezeBars;   // ①膠着とみなす本数
    double sigmaMult;     // ①③で使うσの倍数
-   bool   useLag;        // ②遅行線の陽転/陰転を条件に入れる
    bool   useExpand;     // ④バンド幅の拡大を条件に入れる
    int    expandBars;    // ④拡大を見る本数
 };
@@ -156,8 +155,6 @@ struct SBRule1Params
 struct SBRule1Signal
 {
    bool squeezed;      // ①遅行スパンが帯の内側にとどまっていた
-   bool lagAbove;      // ②遅行線が直近の高値を全て上回っている（買い側）
-   bool lagBelow;      // ②遅行線が直近の安値を全て下回っている（売り側）
    bool crossUp;       // ③遅行スパンが帯を上へ突破した（買いの引き金）
    bool crossDown;     // ③遅行スパンが帯を下へ突破した（売りの引き金）
    bool expanding;     // ④バンド幅が拡大している
@@ -188,27 +185,28 @@ bool SB_LagOffset(const double &close[], const int shift, const int lagBars,
 }
 
 //+------------------------------------------------------------------+
-//| ルール1 — トレンド開始の4条件を判定する                          |
+//| ルール1 — トレンド開始の条件を判定する                           |
 //|                                                                  |
 //| 条件の定義は docs/trading_rules.md §3（用語の一意化）と §4.1     |
-//| （エントリー）。本関数は資料の条件番号 ①②③④ をそのまま持つ。 |
+//| （エントリー）。本関数は資料の条件番号 ①③④ をそのまま持つ。   |
 //|                                                                  |
-//| 終値・高値・安値の3配列とも時系列順（添字 0 = 最新足）が前提。   |
-//| 呼ぶ側が ArraySetAsSeries を済ませること。                       |
+//| ②遅行線の陽転/陰転は条件から外した。2026-08-12 の最適化（15分足・|
+//| 学習期間・1000パス）で、同じ設定どうしの対比較 496 組すべてが     |
+//| 「②を入れないほうが良い」で一致したため（平均 +0.32 pips、       |
+//| 決済Cに限ると +0.53 pips）。ON/OFF の入力ごと削除している。      |
+//| ②の定義そのものはルール2（スパンモデル）が使うので資料には残る。 |
+//|                                                                  |
+//| 終値配列は時系列順（添字 0 = 最新足）が前提。呼ぶ側が            |
+//| ArraySetAsSeries を済ませること。                                |
 //|                                                                  |
 //| 戻り値 false は「判定できない」。履歴が足りない場合などで、この  |
 //| とき out の中身は不定。**戻り値を確認せずに out を読まないこと。**|
 //+------------------------------------------------------------------+
-bool SB_Rule1(const double &close[], const double &high[], const double &low[],
-              const int shift, const SBRule1Params &p, SBRule1Signal &out)
+bool SB_Rule1(const double &close[], const int shift,
+              const SBRule1Params &p, SBRule1Signal &out)
 {
    if(shift < 0 || p.period < 2 || p.sigmaMult <= 0.0)        return false;
    if(p.lagBars < 1 || p.squeezeBars < 1 || p.expandBars < 1) return false;
-
-   // ②だけは高値・安値を直接引くので、ここで長さを見る。終値配列の
-   // 不足は SB_Calc が各所で弾くため、同じ計算をここで持たない。
-   const int lagIdx = shift + p.lagBars;
-   if(ArraySize(high) <= lagIdx || ArraySize(low) <= lagIdx) return false;
 
    // ① 膠着 — 遅行スパンが直前 squeezeBars 本ぶん ±sigmaMult σ の内側に
    // とどまっていた。「21本かけて価格が正味どこへも行っていない」状態を
@@ -225,20 +223,6 @@ bool SB_Rule1(const double &close[], const double &high[], const double &low[],
          break;
       }
    }
-
-   // ② 遅行線の陽転・陰転 — 遅行線の右端が、そこから判定足の手前までの
-   // ローソク足の山を一つ残らず上回っている（谷を一つ残らず下回っている）。
-   // 判定足は含めない（自分の高値は終値より必ず上で、必ず不成立になる）。
-   // docs/trading_rules.md §3.1
-   double hh = high[shift + 1];
-   double ll = low[shift + 1];
-   for(int k = shift + 2; k <= lagIdx; k++)
-   {
-      if(high[k] > hh) hh = high[k];
-      if(low[k]  < ll) ll = low[k];
-   }
-   out.lagAbove = (close[shift] > hh);
-   out.lagBelow = (close[shift] < ll);
 
    // ③ 遅行スパンが帯を突破（引き金）— 状態ではなく遷移として扱う。前の
    // 足では内側にいたことまで要求する。①を外した設定でも、外に居続ける
@@ -258,10 +242,8 @@ bool SB_Rule1(const double &close[], const double &high[], const double &low[],
    out.expanding = (cur.sigma > past.sigma);
 
    out.buy  = out.crossUp   && (!p.useSqueeze || out.squeezed)
-                            && (!p.useLag     || out.lagAbove)
                             && (!p.useExpand  || out.expanding);
    out.sell = out.crossDown && (!p.useSqueeze || out.squeezed)
-                            && (!p.useLag     || out.lagBelow)
                             && (!p.useExpand  || out.expanding);
    return true;
 }

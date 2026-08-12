@@ -53,7 +53,7 @@ foreach ($pat in $Pattern) {
             $rows += [pscustomobject]@{
                 Tag = $tag; 取引 = 0; 平均グロス = $null; 平均ネット = $null; 勝率 = $null
                 保有 = $null; 装填1 = $s['armed1']; 装填2 = $s['armed2']; 発火 = $s['fired']
-                見送り = $s['rsi_blocked']; 期限切れ = $s['arm_expired']; RSI決済 = $s['rsi_exits']
+                見送り = $s['rsi_blocked']; 期限切れ = $s['arm_expired']
             }
             continue
         }
@@ -71,7 +71,6 @@ foreach ($pat in $Pattern) {
             発火       = $s['fired']
             見送り     = $s['rsi_blocked']
             期限切れ   = $s['arm_expired']
-            RSI決済    = $s['rsi_exits']
         }
     }
 }
