@@ -1,4 +1,4 @@
-# MT5 のストラテジーテスターを設定ファイル経由で自動実行する。
+﻿# MT5 のストラテジーテスターを設定ファイル経由で自動実行する。
 #
 # MT5 は /config:<ini> を渡すと、テスターを回して自分で終了する。これで
 # 人手を介さずに条件を変えた連続実行ができる。
@@ -15,6 +15,9 @@
 # 結果は EA 自身が共有フォルダへ CSV で書く（r1_<Tag>_trades.csv /
 # _summary.csv）。テスターの標準レポートは口座通貨での純損益しか出さず、
 # 判定に使うスプレッド抜きのグロス損益が取れないため。
+#
+# その標準レポート（Report=）は出力させない。使わないうえ、保存の途中で
+# 固まることがあり（2026-08-12 に発生）、そこで止まると連続実行が進まない。
 
 [CmdletBinding()]
 param(
@@ -29,7 +32,6 @@ param(
     [int]$UseSqueeze  = 1,                        # ①膠着を条件に入れる
     [int]$SqueezeBars = 21,                       # ①膠着とみなす本数
     [double]$SigmaMult = 3.0,                     # ①③で使うσの倍数
-    [int]$UseLag      = 1,                        # ②遅行線の陽転/陰転を条件に入れる
     [int]$UseExpand   = 1,                        # ④バンド幅の拡大を条件に入れる
     [int]$ExpandBars  = 3,                        # ④拡大を見る本数
     [int]$UseSL       = 0,                        # 損切りを使う
@@ -38,16 +40,38 @@ param(
     [int]$HoldBars    = 24,                       # 手仕舞うまでの本数
     [int]$Reverse     = 1,                        # 反対シグナルでドテンする
     [double]$Lots     = 0.10,                     # ロット
+    [int]$StagedMode  = 0,                        # 段階エントリー 0=使わない 1=装填1のみ 2=装填1+装填2
+    [int]$ArmBars     = 42,                       # 装填が生きている本数
+    [int]$RsiPeriod   = 14,                       # RSI の期間
+    [double]$RsiUpper = 80,                       # 買いの発火を見送る RSI
+    [double]$RsiLower = 20,                       # 売りの発火を見送る RSI
     [int]$Model       = 2,                        # 2=始値のみ（本 EA は足の始値でしか売買しないため過不足なし）
     [int]$TimeoutMin  = 120,
+    [int]$WaitFreeSec = 90,                       # 同じ端末が空くまで待つ秒数
     [string]$Terminal = 'C:\Program Files\XM Trading MT5\terminal64.exe'
 )
 
 $ErrorActionPreference = 'Stop'
 
-$running = Get-Process -Name terminal64 -ErrorAction SilentlyContinue
-if ($running) {
-    Write-Error "MT5 が起動中です (PID $($running.Id -join ', '))。閉じてから実行してください。起動したままだと設定が無視され、テストが走っていないのに成功したように見えます。"
+# 同じデータフォルダを2つの端末が同時に使えないため、起動中だと設定が
+# 無視され、走っていないのに成功したように見える。
+#
+# 判定は**実行ファイルのパスで行う**。プロセス名だけで見ると、別ブローカー
+# の端末（FXGT / OANDA）が起動しているだけで弾いてしまう。データフォルダが
+# 違うので、それらは同時に動いていて構わない。
+#
+# 他システムが一時的に開いていることがあるので、すぐ諦めず少し待つ。
+$termPath = (Resolve-Path $Terminal).Path
+$deadline = (Get-Date).AddSeconds($WaitFreeSec)
+while ($true) {
+    $running = @(Get-Process -Name terminal64 -ErrorAction SilentlyContinue |
+                 Where-Object { $_.Path -eq $termPath })
+    if ($running.Count -eq 0) { break }
+    if ((Get-Date) -gt $deadline) {
+        Write-Error "MT5（$termPath）が起動中です (PID $($running.Id -join ', '))。$WaitFreeSec 秒待ちましたが閉じられませんでした。閉じてから実行してください。"
+    }
+    Write-Host "MT5 が起動中のため待機中… (PID $($running.Id -join ', '))"
+    Start-Sleep -Seconds 5
 }
 
 $common = Join-Path $env:APPDATA 'MetaQuotes\Terminal\Common\Files'
@@ -69,8 +93,6 @@ Deposit=1000000
 Currency=JPY
 Leverage=1:500
 ExecutionMode=0
-Report=$work\report_$Tag
-ReplaceReport=1
 ShutdownTerminal=1
 Visual=0
 
@@ -82,7 +104,6 @@ InpR1_LagBars=$LagBars
 InpR1_UseSqueeze=$UseSqueeze
 InpR1_SqueezeBars=$SqueezeBars
 InpR1_SigmaMult=$SigmaMult
-InpR1_UseLag=$UseLag
 InpR1_UseExpand=$UseExpand
 InpR1_ExpandBars=$ExpandBars
 InpR1_Exit=$Exit
@@ -90,11 +111,16 @@ InpR1_UseSL=$UseSL
 InpR1_SLSigma=$SLSigma
 InpR1_UseTimeStop=$UseTimeStop
 InpR1_HoldBars=$HoldBars
+InpR1_StagedMode=$StagedMode
+InpR1_ArmBars=$ArmBars
+InpR1_RsiPeriod=$RsiPeriod
+InpR1_RsiUpper=$RsiUpper
+InpR1_RsiLower=$RsiLower
 InpRunTag=$Tag
 "@ | Set-Content -Path $ini -Encoding ASCII
 
 Write-Host "設定: $ini"
-Write-Host "実行: $Symbol $Period  $From 〜 $To  決済方式=$Exit  識別名=$Tag"
+Write-Host "実行: $Symbol $Period  $From 〜 $To  決済方式=$Exit  段階=$StagedMode  RSI=$RsiUpper/$RsiLower  識別名=$Tag"
 
 $beforeTrades  = @(Get-ChildItem $common -Filter "r1_${Tag}_trades*.csv"  -ErrorAction SilentlyContinue).Count
 $beforeSummary = @(Get-ChildItem $common -Filter "r1_${Tag}_summary*.csv" -ErrorAction SilentlyContinue).Count
