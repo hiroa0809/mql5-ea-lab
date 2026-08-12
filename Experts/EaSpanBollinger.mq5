@@ -45,9 +45,9 @@ input int    InpR1_HoldBars    = 24;     // 手仕舞うまでの本数
 //--- 段階エントリー。既定は「使わない」＝従来どおりの動き
 input ENUM_SB_STAGED InpR1_StagedMode = SB_STAGED_OFF;  // 段階エントリー
 input int    InpR1_ArmBars     = 42;     // 装填が生きている本数（装填1 から数える）
-input int    InpR1_RsiPeriod   = 14;     // RSI の期間
-input double InpR1_RsiUpper    = 80.0;   // 買いを見送る／買いを決済する RSI
-input double InpR1_RsiLower    = 20.0;   // 売りを見送る／売りを決済する RSI
+input int    InpR1_RsiPeriod   = 14;     // RSI の期間（段階エントリーの見送り判定に使う）
+input double InpR1_RsiUpper    = 80.0;   // 買いの発火を見送る RSI（これ以上なら入らない）
+input double InpR1_RsiLower    = 20.0;   // 売りの発火を見送る RSI（これ以下なら入らない）
 
 //--- 診断
 input bool   InpPrintCounters = true;    // 条件別の成立回数を出力する

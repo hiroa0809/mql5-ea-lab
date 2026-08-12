@@ -347,8 +347,8 @@ struct SBStagedParams
 {
    int    stages;      // ENUM_SB_STAGED の値。0 なら段階エントリーを使わない
    int    armBars;     // 装填が生きている本数（装填1 した足の次から数える）
-   double rsiUpper;    // 買いを見送る／買いを決済する RSI
-   double rsiLower;    // 売りを見送る／売りを決済する RSI
+   double rsiUpper;    // 買いの発火を見送る RSI（これ以上なら入らない）
+   double rsiLower;    // 売りの発火を見送る RSI（これ以下なら入らない）
 };
 
 //+------------------------------------------------------------------+

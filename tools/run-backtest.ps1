@@ -10,6 +10,9 @@
 # 結果は EA 自身が共有フォルダへ CSV で書く（r1_<Tag>_trades.csv /
 # _summary.csv）。テスターの標準レポートは口座通貨での純損益しか出さず、
 # 判定に使うスプレッド抜きのグロス損益が取れないため。
+#
+# その標準レポート（Report=）は出力させない。使わないうえ、保存の途中で
+# 固まることがあり（2026-08-12 に発生）、そこで止まると連続実行が進まない。
 
 [CmdletBinding()]
 param(
@@ -19,19 +22,39 @@ param(
     [string]$Symbol   = 'USDJPY#',
     [string]$Period   = 'M5',
     [int]$Exit        = 0,                        # 決済の方式 0=A 1=B 2=C
+    [int]$UseSqueeze  = 1,                        # ①膠着を条件に入れる 0=入れない 1=入れる
+    [int]$SqueezeBars = 21,                       # ①膠着とみなす本数
+    [int]$ExpandBars  = 3,                        # ④拡大を見る本数
     [int]$StagedMode  = 0,                        # 段階エントリー 0=使わない 1=装填1のみ 2=装填1+装填2
-    [double]$RsiUpper = 80,                       # 買いを見送る／決済する RSI
+    [double]$RsiUpper = 80,                       # 買いの発火を見送る RSI
     [double]$RsiLower = 20,                       # 売りを見送る RSI
     [int]$Model       = 2,                        # 2=始値のみ（本 EA は足の始値でしか売買しないため過不足なし）
     [int]$TimeoutMin  = 120,
+    [int]$WaitFreeSec = 90,                       # 同じ端末が空くまで待つ秒数
     [string]$Terminal = 'C:\Program Files\XM Trading MT5\terminal64.exe'
 )
 
 $ErrorActionPreference = 'Stop'
 
-$running = Get-Process -Name terminal64 -ErrorAction SilentlyContinue
-if ($running) {
-    Write-Error "MT5 が起動中です (PID $($running.Id -join ', '))。閉じてから実行してください。起動したままだと設定が無視され、テストが走っていないのに成功したように見えます。"
+# 同じデータフォルダを2つの端末が同時に使えないため、起動中だと設定が
+# 無視され、走っていないのに成功したように見える。
+#
+# 判定は**実行ファイルのパスで行う**。プロセス名だけで見ると、別ブローカー
+# の端末（FXGT / OANDA）が起動しているだけで弾いてしまう。データフォルダが
+# 違うので、それらは同時に動いていて構わない。
+#
+# 他システムが一時的に開いていることがあるので、すぐ諦めず少し待つ。
+$termPath = (Resolve-Path $Terminal).Path
+$deadline = (Get-Date).AddSeconds($WaitFreeSec)
+while ($true) {
+    $running = @(Get-Process -Name terminal64 -ErrorAction SilentlyContinue |
+                 Where-Object { $_.Path -eq $termPath })
+    if ($running.Count -eq 0) { break }
+    if ((Get-Date) -gt $deadline) {
+        Write-Error "MT5（$termPath）が起動中です (PID $($running.Id -join ', '))。$WaitFreeSec 秒待ちましたが閉じられませんでした。閉じてから実行してください。"
+    }
+    Write-Host "MT5 が起動中のため待機中… (PID $($running.Id -join ', '))"
+    Start-Sleep -Seconds 5
 }
 
 $common = Join-Path $env:APPDATA 'MetaQuotes\Terminal\Common\Files'
@@ -53,13 +76,14 @@ Deposit=1000000
 Currency=JPY
 Leverage=1:500
 ExecutionMode=0
-Report=$work\report_$Tag
-ReplaceReport=1
 ShutdownTerminal=1
 Visual=0
 
 [TesterInputs]
 InpR1_Exit=$Exit
+InpR1_UseSqueeze=$UseSqueeze
+InpR1_SqueezeBars=$SqueezeBars
+InpR1_ExpandBars=$ExpandBars
 InpR1_StagedMode=$StagedMode
 InpR1_RsiUpper=$RsiUpper
 InpR1_RsiLower=$RsiLower

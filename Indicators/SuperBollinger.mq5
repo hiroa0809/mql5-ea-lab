@@ -120,9 +120,9 @@ input ENUM_SB_EXIT InpExit  = SB_EXIT_CLOSE_SIGMA1;  // 決済の方式
 //--- 段階エントリー。既定は「使わない」＝従来どおりの動き
 input ENUM_SB_STAGED InpStagedMode = SB_STAGED_OFF;  // 段階エントリー
 input int    InpArmBars     = 42;     // 装填が生きている本数（装填1 から数える）
-input int    InpRsiPeriod   = 14;     // RSI の期間
-input double InpRsiUpper    = 80.0;   // 買いを見送る／買いを決済する RSI
-input double InpRsiLower    = 20.0;   // 売りを見送る／売りを決済する RSI
+input int    InpRsiPeriod   = 14;     // RSI の期間（段階エントリーの見送り判定に使う）
+input double InpRsiUpper    = 80.0;   // 買いの発火を見送る RSI（これ以上なら入らない）
+input double InpRsiLower    = 20.0;   // 売りの発火を見送る RSI（これ以下なら入らない）
 
 double BufCenter[], BufU1[], BufL1[], BufU2[], BufL2[], BufU3[], BufL3[], BufLag[];
 double BufBuy[], BufSell[];

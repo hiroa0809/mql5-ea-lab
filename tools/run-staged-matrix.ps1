@@ -59,9 +59,12 @@ for ($i = 0; $i -lt $combos.Count; $i++) {
                   -RsiUpper $c.Up -RsiLower $c.Low -TimeoutMin $TimeoutMin
     }
     catch {
-        # 1本失敗しても残りは回す。全部やり直すと時間の無駄になる
+        # 1本失敗したら残りも同じ理由で失敗する。同じ警告を並べても何も
+        # 分からないので、その場で止める
         Write-Warning ("{0} が失敗: {1}" -f $c.Tag, $_.Exception.Message)
+        Write-Warning ("残り {0} 本は実行していません。" -f ($combos.Count - $i - 1))
         $failed += $c.Tag
+        break
     }
 }
 
