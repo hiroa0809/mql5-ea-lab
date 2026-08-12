@@ -102,6 +102,20 @@ int OnInit()
       Print("手仕舞うまでの本数は 1 以上にしてください");
       return INIT_PARAMETERS_INCORRECT;
    }
+   if(InpR1_UseSL && InpR1_SLSigma <= 0.0)
+   {
+      // 0 以下でも起動できてしまうと、NormalizeStopLevel が最小距離まで
+      // 黙って広げる。設定したはずの損切りと違う条件でテストが走る
+      Print("損切り（σの何倍）は 0 より大きくしてください");
+      return INIT_PARAMETERS_INCORRECT;
+   }
+   if(InpMagic <= 0)
+   {
+      // 0 だと、識別番号を持たない建玉（手動注文など）を自分のものと
+      // 見なす。決済はチケット指定で行うため、無関係の建玉を閉じうる
+      Print("マジックナンバーは 1 以上にしてください（0 は識別番号なしの建玉と区別が付かない）");
+      return INIT_PARAMETERS_INCORRECT;
+   }
 
    const double lotMin  = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
    const double lotMax  = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
@@ -141,6 +155,12 @@ int OnInit()
 
    g_trade.SetExpertMagicNumber((ulong)InpMagic);
    g_trade.SetTypeFillingBySymbol(_Symbol);
+
+   // 現在の足の時刻を先に控える。0 のままだと、足の途中で EA を貼った
+   // ときや再初期化されたときに、最初の OnTick が「新しい足ができた」と
+   // 判定して足の途中で発注してしまう。「発注は次の足の始値」という
+   // 決まりから外れる（docs/implementation_design.md §3）
+   g_lastBarTime = (datetime)SeriesInfoInteger(_Symbol, _Period, SERIES_LASTBAR_DATE);
 
    return INIT_SUCCEEDED;
 }
@@ -260,6 +280,9 @@ string CsvName(const string kind, const int seq)
 //|                                                                  |
 //| FILE_WRITE は既存ファイルを即座に空にするため、名前が衝突すると  |
 //| 前回の測定結果が消える。実在確認で防ぐ（SpreadProbe と同じ）。   |
+//|                                                                  |
+//| 空きが無ければ −1 を返す。ここで 999 を返すと、まさに防ぎたい    |
+//| 上書きが起きる。呼ぶ側は書き込みごと中止すること。               |
 //+------------------------------------------------------------------+
 int FreeCsvSeq()
 {
@@ -268,7 +291,7 @@ int FreeCsvSeq()
          && !FileIsExist(CsvName("summary", seq), FILE_COMMON))
          return seq;
 
-   return 999;
+   return -1;
 }
 
 //+------------------------------------------------------------------+
@@ -284,6 +307,13 @@ void WriteCsv()
       return;
 
    const int seq = FreeCsvSeq();
+   if(seq < 0)
+   {
+      PrintFormat("EaSpanBollinger: 識別名 %s の連番が 0〜999 まで埋まっています。既存の結果を上書きしないため CSV を書きませんでした。共有フォルダを整理してください",
+                  InpRunTag);
+      return;
+   }
+
    const int rows = ArraySize(g_rows);
 
    const string tradesName = CsvName("trades", seq);
@@ -329,6 +359,12 @@ void WriteCsv()
    FileWrite(fs, "use_lag",       InpR1_UseLag ? 1 : 0);
    FileWrite(fs, "use_expand",    InpR1_UseExpand ? 1 : 0);
    FileWrite(fs, "use_sl",        InpR1_UseSL ? 1 : 0);
+   // 売買結果を変える入力は全部残す。無いと保存した結果から条件を再現できない
+   FileWrite(fs, "sl_sigma",      DoubleToString(InpR1_SLSigma, 2));
+   FileWrite(fs, "use_timestop",  InpR1_UseTimeStop ? 1 : 0);
+   FileWrite(fs, "hold_bars",     InpR1_HoldBars);
+   FileWrite(fs, "reverse",       InpReverseOnOpposite ? 1 : 0);
+   FileWrite(fs, "lots",          DoubleToString(InpLots, 2));
    FileWrite(fs, "judged_bars",   g_cntJudged);
    FileWrite(fs, "cond1_squeeze", g_cntSqueeze);
    FileWrite(fs, "cond2_lag",     g_cntLag);
@@ -514,12 +550,23 @@ bool ClosePosition(const string reason)
 }
 
 //+------------------------------------------------------------------+
-//| 直前の取引要求が約定したか                                       |
+//| 直前の取引要求が「完全に約定した」か                             |
+//|                                                                  |
+//| 完全約定（DONE）だけを true にする。以下は数えない:              |
+//|   PLACED       … 受け付けられただけで、まだ約定していない       |
+//|   DONE_PARTIAL … 一部だけ約定し、残りが残っている               |
+//|                                                                  |
+//| これらを約定として扱うと、建玉が無いのに記録を作る／建玉が残る   |
+//| のに記録を閉じる、といった食い違いが起きる。逆に false を返した  |
+//| ときも、部分約定なら建玉自体は存在するため、気づけるようログへ   |
+//| 明示的に出す（下の ReportTradeResult が retcode を書き出す）。   |
+//|                                                                  |
+//| ロットは固定の少量で、テスターの成行では DONE 以外はまず出ない。 |
+//| 出たら手で確認する前提で、残量の自動処理までは持たない。         |
 //+------------------------------------------------------------------+
 bool IsFilled()
 {
-   const uint retcode = g_trade.ResultRetcode();
-   return (retcode == TRADE_RETCODE_DONE || retcode == TRADE_RETCODE_PLACED);
+   return (g_trade.ResultRetcode() == TRADE_RETCODE_DONE);
 }
 
 //+------------------------------------------------------------------+
