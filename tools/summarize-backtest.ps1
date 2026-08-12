@@ -1,4 +1,4 @@
-# バックテストの CSV から、判定に使う数字だけを表にする。
+﻿# バックテストの CSV から、判定に使う数字だけを表にする。
 #
 # テスターの標準レポートは口座通貨での純損益しか出さない。判定に使うのは
 # スプレッドを除いたグロス損益なので、EA が書いた trades CSV から計算する。
@@ -25,6 +25,7 @@ function Read-Summary([string]$path) {
 }
 
 $rows = @()
+$missing = @()   # summary はあるのに明細が無い実行。黙って捨てない
 
 foreach ($pat in $Pattern) {
     # EA は同じ識別名で再実行すると _001 のような連番を付ける。連番なしだけを
@@ -34,7 +35,12 @@ foreach ($pat in $Pattern) {
         if ($f.Name -notmatch '^r1_(?<tag>.+?)_summary(?<seq>_\d+)?\.csv$') { continue }
         $tag = $Matches['tag'] + $Matches['seq']
         $tradesPath = Join-Path $Common ("r1_{0}_trades{1}.csv" -f $Matches['tag'], $Matches['seq'])
-        if (-not (Test-Path $tradesPath)) { continue }
+        if (-not (Test-Path $tradesPath)) {
+            # 片方しか書けなかった実行を黙って飛ばすと、失敗を隠したまま
+            # 残りだけで平均を出すことになる。必ず名前を挙げて知らせる
+            $missing += $f.Name
+            continue
+        }
 
         $s = Read-Summary $f.FullName
         $point = [double]$s['point']
@@ -81,4 +87,8 @@ foreach ($pat in $Pattern) {
 
 $rows | Sort-Object Tag | Format-Table -AutoSize
 Write-Host ""
+if ($missing.Count -gt 0) {
+    Write-Warning ("明細（trades）が無いため集計から外した実行が {0} 件あります。バックテストが途中で失敗した可能性があります:" -f $missing.Count)
+    $missing | ForEach-Object { Write-Warning "  $_" }
+}
 Write-Host "合否ラインは平均グロス 3.7 pips（往復コスト 1.22 × 3）。docs/backtest_design.md"
