@@ -62,7 +62,6 @@ Experts\
 
 | 変数 | 既定 | 表示名 |
 |---|---|---|
-| `InpR1_Enable` | true | ルール1を使う |
 | `InpR1_Period` | 21 | 期間（センターラインとσ） |
 | `InpR1_LagBars` | 21 | 遅行線の本数 |
 | `InpR1_UseSqueeze` | true | ①膠着を条件に入れる |

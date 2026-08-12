@@ -14,6 +14,11 @@
 //| ルール2（スパンモデル）は未実装。入力項目も置いていない。無言で  |
 //| 何もしない設定が残るのを避けるため、N5-2 で同時に足す。          |
 //|                                                                  |
+//| 同じ理由で「ルール1を使う」の入力も置かない（2026-08-12 に削除）。|
+//| 実装済みのルールが1つしかない今、false は EA を丸ごと黙らせる    |
+//| だけで、エラーも警告も出ないまま取引ゼロになる。ルール2を足す    |
+//| ときに InpR1_Enable / InpR2_Enable を対で用意する。              |
+//|                                                                  |
 //| 売買条件は docs/trading_rules.md §4、執行は                      |
 //| docs/implementation_design.md §3。                               |
 //+------------------------------------------------------------------+
@@ -28,7 +33,6 @@ input long   InpMagic             = 20260808;  // マジックナンバー
 input bool   InpReverseOnOpposite = true;      // 反対シグナルでドテンする
 
 //--- ルール1: スーパーボリンジャー
-input bool   InpR1_Enable      = true;   // ルール1を使う
 input int    InpR1_Period      = 21;     // 期間（センターラインとσ）
 input int    InpR1_LagBars     = 21;     // 遅行線の本数
 input bool   InpR1_UseSqueeze  = true;   // ①膠着を条件に入れる
@@ -238,8 +242,6 @@ void OnDeinit(const int reason)
 void OnTick()
 {
    if(!IsNewBar())
-      return;
-   if(!InpR1_Enable)
       return;
 
    double close[], high[], low[];
