@@ -85,17 +85,14 @@ fixed_height=-1
 <inputs>
 InpPeriod=21
 InpLagBars=21
-InpUseSqueeze=true
 InpSqueezeBars=21
 InpSigmaMult=3.0
-InpUseExpand=true
 InpExpandBars=8
-InpExit=2
+InpExitMode=0
+InpSarStep=0.01
+InpSarMax=0.20
 InpStagedMode=0
 InpArmBars=42
-InpRsiPeriod=14
-InpRsiUpper=80.0
-InpRsiLower=20.0
 </inputs>
 </indicator>
 
@@ -121,7 +118,7 @@ draw=3
 style=0
 width=2
 arrow=159
-color=16776960
+color=55295
 </graph>
 step=0.010000
 max=0.200000

@@ -39,25 +39,25 @@ $base = @{
     Period      = $Period
     From        = $From
     To          = $To
-    Exit        = 2      # C: 遅行スパンが反対側へ陰転
     SqueezeBars = 21
     ExpandBars  = 8
     StagedMode  = 0
     TimeoutMin  = $TimeoutMin
 }
 
+# 決済の方式: 0=遅行スパンの陰転 1=SAR 2=併用
 $runs = @(
     # 回帰確認。SAR を使わず、既存の 1.93 pips が再現されるかを見る
-    [pscustomobject]@{ Tag = 'sar_off_m2'   ; SarMode = 0; SarExec = 0; Gate = 0; Model = 2 }
+    [pscustomobject]@{ Tag = 'sar_off_m2'   ; ExitMode = 0; SarExec = 0; Gate = 0; Model = 2 }
     # 以下は比較用。ベースラインも同じティック方式で取り直す
-    [pscustomobject]@{ Tag = 'sar_off'      ; SarMode = 0; SarExec = 0; Gate = 0; Model = 4 }
-    [pscustomobject]@{ Tag = 'sar_only_stop'; SarMode = 1; SarExec = 0; Gate = 0; Model = 4 }
-    [pscustomobject]@{ Tag = 'sar_only_bid' ; SarMode = 1; SarExec = 1; Gate = 0; Model = 4 }
-    [pscustomobject]@{ Tag = 'sar_both_stop'; SarMode = 2; SarExec = 0; Gate = 0; Model = 4 }
-    [pscustomobject]@{ Tag = 'sar_both_bid' ; SarMode = 2; SarExec = 1; Gate = 0; Model = 4 }
+    [pscustomobject]@{ Tag = 'sar_off'      ; ExitMode = 0; SarExec = 0; Gate = 0; Model = 4 }
+    [pscustomobject]@{ Tag = 'sar_only_stop'; ExitMode = 1; SarExec = 0; Gate = 0; Model = 4 }
+    [pscustomobject]@{ Tag = 'sar_only_bid' ; ExitMode = 1; SarExec = 1; Gate = 0; Model = 4 }
+    [pscustomobject]@{ Tag = 'sar_both_stop'; ExitMode = 2; SarExec = 0; Gate = 0; Model = 4 }
+    [pscustomobject]@{ Tag = 'sar_both_bid' ; ExitMode = 2; SarExec = 1; Gate = 0; Model = 4 }
     # ゲート ON。sar_only_stop と完全一致すれば「ポインタが逆側」は一度も
     # 起きなかったことの証明になる
-    [pscustomobject]@{ Tag = 'sar_gate_stop'; SarMode = 1; SarExec = 0; Gate = 1; Model = 4 }
+    [pscustomobject]@{ Tag = 'sar_gate_stop'; ExitMode = 1; SarExec = 0; Gate = 1; Model = 4 }
 )
 
 if ($Only.Count -gt 0) {
@@ -66,7 +66,7 @@ if ($Only.Count -gt 0) {
 }
 
 Write-Host ("回す本数: {0}" -f $runs.Count)
-$runs | ForEach-Object { Write-Host ("  {0}  (SAR={1}/{2} ゲート={3} ティック={4})" -f $_.Tag, $_.SarMode, $_.SarExec, $_.Gate, $_.Model) }
+$runs | ForEach-Object { Write-Host ("  {0}  (決済={1} 執行={2} ゲート={3} ティック={4})" -f $_.Tag, $_.ExitMode, $_.SarExec, $_.Gate, $_.Model) }
 
 $total  = [System.Diagnostics.Stopwatch]::StartNew()
 $failed = @()
@@ -77,7 +77,7 @@ foreach ($r in $runs) {
     Write-Host ("=== {0} ===" -f $tag)
 
     try {
-        & $runner @base -Tag $tag -SarMode $r.SarMode -SarExec $r.SarExec -SarEntryGate $r.Gate -Model $r.Model
+        & $runner @base -Tag $tag -ExitMode $r.ExitMode -SarExec $r.SarExec -SarEntryGate $r.Gate -Model $r.Model
     }
     catch {
         Write-Warning ("{0} が失敗しました: {1}" -f $tag, $_.Exception.Message)

@@ -128,7 +128,7 @@ int SB_RequiredBars(const int period, const int lagBars, const int squeezeBars, 
 //+------------------------------------------------------------------+
 //| ルール1（トレンド開始）の入力                                    |
 //|                                                                  |
-//| インジケーターと EA が同じ判定を使うため、条件の ON/OFF まで含め |
+//| インジケーターと EA が同じ判定を使うため、本数と倍率をまとめて   |
 //| てここへ集める。③（遅行スパンの帯突破）だけ ON/OFF が無いのは、 |
 //| これが引き金であり外すとルールが成立しないため。                 |
 //| 出典: docs/implementation_design.md §2                           |
@@ -137,10 +137,8 @@ struct SBRule1Params
 {
    int    period;        // センターラインとσの期間
    int    lagBars;       // 遅行線の本数
-   bool   useSqueeze;    // ①膠着を条件に入れる
    int    squeezeBars;   // ①膠着とみなす本数
    double sigmaMult;     // ①③で使うσの倍数
-   bool   useExpand;     // ④バンド幅の拡大を条件に入れる
    int    expandBars;    // ④拡大を見る本数
 };
 
@@ -241,31 +239,30 @@ bool SB_Rule1(const double &close[], const int shift,
    if(!SB_Calc(close, shift + p.expandBars, p.period, past)) return false;
    out.expanding = (cur.sigma > past.sigma);
 
-   out.buy  = out.crossUp   && (!p.useSqueeze || out.squeezed)
-                            && (!p.useExpand  || out.expanding);
-   out.sell = out.crossDown && (!p.useSqueeze || out.squeezed)
-                            && (!p.useExpand  || out.expanding);
+   // ①③④とも必須。①膠着と④拡大の ON/OFF は 2026-08-13 に廃止した。
+   // N6-1b で①は 21 本が妥当・④は残すと結論が出ており、切る設定を
+   // 選ぶ理由が無い（tasks/TASK_MASTER.md）
+   out.buy  = out.crossUp   && out.squeezed && out.expanding;
+   out.sell = out.crossDown && out.squeezed && out.expanding;
    return true;
 }
 
 //+------------------------------------------------------------------+
 //| ルール1の手仕舞い方式                                            |
 //|                                                                  |
-//| A は資料 p13 のとおり。B と C は【一意化】で、エントリーと同じ   |
-//| 物差し（遅行スパンと帯の距離）を使う。                           |
+//| **旧 A（終値が1σの内側へ戻る）と旧 B（遅行スパンが1σの内側へ   |
+//| 戻る）は廃止した**（2026-08-13）。学習期間で A 0.29 / B 0.75 /   |
+//| C 0.90 pips と C が一貫して最良で、以後の検証もすべて C で行って |
+//| いる。選べるまま残すと、つまみが増えるだけで選ばれない。         |
 //|                                                                  |
-//| A を分けてある理由: エントリーは④で「バンド幅が拡大している」   |
-//| ことを要求するので、発火を起こした値動きがそのまま今のσを膨らま |
-//| せる。A は「今の帯」を基準にするため、**エントリーの勢いが強い   |
-//| ほど決済のハードルが下がる**。B・C にはこの反応が無い。          |
-//|                                                                  |
-//| どれが良いかは学習期間の平均グロス損益で決める（回数制限なし）。 |
+//| 残る選択は「遅行スパンの陰転」と「パラボリック SAR」の組み合わせ |
+//| だけ。定義は docs/trading_rules.md §4.2。                        |
 //+------------------------------------------------------------------+
-enum ENUM_SB_EXIT
+enum ENUM_R1_EXIT
 {
-   SB_EXIT_CLOSE_SIGMA1 = 0,   // A 終値が 1σ の内側へ戻る（資料 p13）
-   SB_EXIT_LAG_SIGMA1   = 1,   // B 遅行スパンが 1σ の内側へ戻る
-   SB_EXIT_LAG_FLIP     = 2    // C 遅行スパンが反対側へ陰転する
+   R1_EXIT_LAG_FLIP = 0,   // 遅行スパンが反対側へ陰転する
+   R1_EXIT_SAR      = 1,   // パラボリック SAR
+   R1_EXIT_BOTH     = 2    // 併用（どちらか早いほう）
 };
 
 //+------------------------------------------------------------------+
@@ -275,31 +272,16 @@ enum ENUM_SB_EXIT
 //| 保有中に毎足チェックする条件なので、遷移として書くと取り逃した   |
 //| とき決済されないまま走り続ける。docs/trading_rules.md §3.3b・§4.2|
 //|                                                                  |
-//| A について: p13 は「バンド幅が収束傾向」「遅行スパンが絡む」も   |
-//| 併記しているが、3つ揃うのを待つと調整が進んだ後の決済になる。    |
-//|                                                                  |
-//| B の 1σ は固定。つまみにすると学習期間の成績が実力以上に出る。   |
+//| 遅行スパンが反対側へ陰転したかを見る。エントリーと同じ物差し     |
+//| （遅行スパンと帯の距離）なので、発火の勢いで判定が甘くならない。 |
 //+------------------------------------------------------------------+
 bool SB_Rule1Exit(const double &close[], const int shift, const int period,
-                  const int lagBars, const ENUM_SB_EXIT method,
-                  const bool isLong, bool &out)
+                  const int lagBars, const bool isLong, bool &out)
 {
-   if(method == SB_EXIT_CLOSE_SIGMA1)
-   {
-      SBValues v;
-      if(!SB_Calc(close, shift, period, v)) return false;
-      out = isLong ? (close[shift] < v.upper1) : (close[shift] > v.lower1);
-      return true;
-   }
-
    double z;
    if(!SB_LagOffset(close, shift, lagBars, period, z)) return false;
 
-   if(method == SB_EXIT_LAG_SIGMA1)
-      out = isLong ? (z <= 1.0) : (z >= -1.0);
-   else
-      out = isLong ? (z < 0.0) : (z > 0.0);
-
+   out = isLong ? (z < 0.0) : (z > 0.0);
    return true;
 }
 
@@ -347,9 +329,15 @@ struct SBStagedParams
 {
    int    stages;      // ENUM_SB_STAGED の値。0 なら段階エントリーを使わない
    int    armBars;     // 装填が生きている本数（装填1 した足の次から数える）
-   double rsiUpper;    // 買いの発火を見送る RSI（これ以上なら入らない）
-   double rsiLower;    // 売りの発火を見送る RSI（これ以下なら入らない）
 };
+
+//--- RSI の期間と閾値は固定する（2026-08-13 に入力から外した）。
+//    段階エントリーの見送り判定でしか使わず、その段階エントリー自体が
+//    既定 OFF。つまみを増やすほど学習期間の成績は実力以上に出る
+//    （docs/implementation_design.md の損切り節）
+#define SB_RSI_PERIOD 14
+#define SB_RSI_UPPER  80.0
+#define SB_RSI_LOWER  20.0
 
 //+------------------------------------------------------------------+
 //| 装填の状態 — 足をまたいで持ち越す                                |
@@ -389,9 +377,9 @@ struct SBStagedResult
 //| の決済の両方が同じ判定を使う。「行きすぎているなら入らない・      |
 //| 持っているなら降りる」で向きがそろう。                            |
 //+------------------------------------------------------------------+
-bool SB_RsiExtreme(const double rsi, const bool isLong, const SBStagedParams &p)
+bool SB_RsiExtreme(const double rsi, const bool isLong)
 {
-   return isLong ? (rsi >= p.rsiUpper) : (rsi <= p.rsiLower);
+   return isLong ? (rsi >= SB_RSI_UPPER) : (rsi <= SB_RSI_LOWER);
 }
 
 //+------------------------------------------------------------------+
@@ -401,13 +389,13 @@ bool SB_RsiExtreme(const double rsi, const bool isLong, const SBStagedParams &p)
 //| もの（ダマシで建てた想定の建玉が、選んでいる決済方式で切られたか）。|
 //+------------------------------------------------------------------+
 bool SB_StagedStopHit(const double &close[], const int shift, const int period,
-                      const int lagBars, const ENUM_SB_EXIT method,
+                      const int lagBars,
                       const SBStagedParams &p, const SBArmState &st)
 {
    if(p.stages < 2 || st.stage != 1) return false;
 
    bool hit;
-   if(!SB_Rule1Exit(close, shift, period, lagBars, method, st.dir > 0, hit)) return false;
+   if(!SB_Rule1Exit(close, shift, period, lagBars, st.dir > 0, hit)) return false;
    return hit;
 }
 
@@ -415,8 +403,8 @@ bool SB_StagedStopHit(const double &close[], const int shift, const int period,
 //| 装填の状態を1本ぶん進める                                        |
 //|                                                                  |
 //| stopHit には SB_StagedStopHit の結果を渡す。決済条件の評価に      |
-//| 終値配列と決済方式が要り、それを本関数へ持ち込むと引数が増える    |
-//| だけなので、呼ぶ側で求めてから渡す形にしている。                  |
+//| 終値配列が要り、それを本関数へ持ち込むと引数が増えるだけなので、  |
+//| 呼ぶ側で求めてから渡す形にしている。                              |
 //|                                                                  |
 //| st は入出力。呼ぶ側が古い足から新しい足へ順に呼ぶこと。逆順や     |
 //| 飛ばし呼びをすると経過本数が狂うが、エラーにはならない。          |
@@ -468,7 +456,7 @@ void SB_StagedStep(const SBRule1Signal &s, const double rsi, const bool stopHit,
          st.stage = 0;
          consumed = true;
 
-         if(SB_RsiExtreme(rsi, isLong, p))
+         if(SB_RsiExtreme(rsi, isLong))
             out.rsiBlocked = true;      // 見送り。装填も解除する
          else if(isLong)
             out.fireBuy  = true;

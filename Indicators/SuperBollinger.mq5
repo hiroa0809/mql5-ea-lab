@@ -19,8 +19,8 @@
 //| 売買条件は docs/trading_rules.md §4.1。                          |
 //+------------------------------------------------------------------+
 #property indicator_chart_window
-#property indicator_buffers 22
-#property indicator_plots   20
+#property indicator_buffers 24
+#property indicator_plots   22
 
 #property indicator_label1  "センターライン"
 #property indicator_type1   DRAW_LINE
@@ -106,28 +106,39 @@
 #property indicator_label20 "装填1 からの本数"
 #property indicator_type20  DRAW_NONE
 
+// SAR による決済。形は既存の決済（✗）と同じで色だけ分ける。ポインタ自体は
+// 描かない（MT5 標準のパラボリック SAR を重ねる。二重に描く意味が無い）。
+// 金色で SAR 系をひとまとめにする — tools/r1-verify.tpl のポインタも同色
+#property indicator_label21 "SAR 買いの決済"
+#property indicator_type21  DRAW_ARROW
+#property indicator_color21 clrGold
+#property indicator_width21 5
+
+#property indicator_label22 "SAR 売りの決済"
+#property indicator_type22  DRAW_ARROW
+#property indicator_color22 clrGold
+#property indicator_width22 5
+
 #include <Signals\SuperBollinger.mqh>
 
 input int    InpPeriod      = 21;    // 期間（センターラインとσ）
 input int    InpLagBars     = 21;    // 遅行線の本数
-input bool   InpUseSqueeze  = true;  // ①膠着を条件に入れる
 input int    InpSqueezeBars = 21;    // ①膠着とみなす本数（この本数ぶん帯の内側）
 input double InpSigmaMult   = 3.0;   // ①③で使うσの倍数
-input bool   InpUseExpand   = true;  // ④バンド幅の拡大を条件に入れる
 input int    InpExpandBars  = 3;     // ④拡大を見る本数
-input ENUM_SB_EXIT InpExit  = SB_EXIT_CLOSE_SIGMA1;  // 決済の方式
+input ENUM_R1_EXIT InpExitMode = R1_EXIT_LAG_FLIP;  // 決済の方式
+input double InpSarStep     = 0.01;  // SAR のステップ（食いつきの刻み）
+input double InpSarMax      = 0.20;  // SAR の最大（食いつきの頭打ち）
 
 //--- 段階エントリー。既定は「使わない」＝従来どおりの動き
 input ENUM_SB_STAGED InpStagedMode = SB_STAGED_OFF;  // 段階エントリー
 input int    InpArmBars     = 42;     // 装填が生きている本数（装填1 から数える）
-input int    InpRsiPeriod   = 14;     // RSI の期間（段階エントリーの見送り判定に使う）
-input double InpRsiUpper    = 80.0;   // 買いの発火を見送る RSI（これ以上なら入らない）
-input double InpRsiLower    = 20.0;   // 売りの発火を見送る RSI（これ以下なら入らない）
 
 double BufCenter[], BufU1[], BufL1[], BufU2[], BufL2[], BufU3[], BufL3[], BufLag[];
 double BufBuy[], BufSell[];
 double BufC1[], BufC3[], BufC4[], BufLagZ[];
 double BufExitBuy[], BufExitSell[];
+double BufSarExitBuy[], BufSarExitSell[];
 double BufArm1[], BufArm2[], BufArmStage[], BufArmAge[];
 double BufArmDir[]; // 装填1 の向き。差分更新で状態を引き継ぐためだけに持つ
 double BufPos[];    // 各足を処理し終えた時点の建玉（+1 買い / −1 売り / 0 無し）
@@ -135,6 +146,8 @@ double BufPos[];    // 各足を処理し終えた時点の建玉（+1 買い / 
 SBRule1Params  g_rule1;
 SBStagedParams g_staged;
 int            g_rsiHandle = INVALID_HANDLE;
+int            g_sarHandle = INVALID_HANDLE;
+bool           g_needSar   = false;
 bool           g_needRsi   = false;   // 段階エントリーの発火を見送るかの判定に RSI を使う
 
 //+------------------------------------------------------------------+
@@ -176,18 +189,7 @@ int OnInit()
 
    if(g_needRsi)
    {
-      if(InpRsiPeriod < 2)
-      {
-         Print("RSI の期間は 2 以上にしてください");
-         return INIT_PARAMETERS_INCORRECT;
-      }
-      if(!(InpRsiLower > 0.0 && InpRsiLower < InpRsiUpper && InpRsiUpper < 100.0))
-      {
-         Print("RSI の閾値は 0 < 売り側 < 買い側 < 100 にしてください");
-         return INIT_PARAMETERS_INCORRECT;
-      }
-
-      g_rsiHandle = iRSI(_Symbol, _Period, InpRsiPeriod, PRICE_CLOSE);
+      g_rsiHandle = iRSI(_Symbol, _Period, SB_RSI_PERIOD, PRICE_CLOSE);
       if(g_rsiHandle == INVALID_HANDLE)
       {
          PrintFormat("RSI を作成できませんでした (error=%d)", GetLastError());
@@ -195,17 +197,33 @@ int OnInit()
       }
    }
 
+   // ポインタは描かないが、建玉をいつ手放したかの判定には値が要る。
+   // ここが EA と食い違うと、保有中と見なす期間がずれてエントリー矢印の
+   // 出方まで変わる（保有中の同じ向きは矢印を出さないため）
+   g_needSar = (InpExitMode != R1_EXIT_LAG_FLIP);
+   if(g_needSar)
+   {
+      if(!(InpSarStep > 0.0 && InpSarStep <= InpSarMax))
+      {
+         Print("SAR は 0 < ステップ <= 最大 にしてください");
+         return INIT_PARAMETERS_INCORRECT;
+      }
+
+      g_sarHandle = iSAR(_Symbol, _Period, InpSarStep, InpSarMax);
+      if(g_sarHandle == INVALID_HANDLE)
+      {
+         PrintFormat("パラボリック SAR を作成できませんでした (error=%d)", GetLastError());
+         return INIT_FAILED;
+      }
+   }
+
    g_staged.stages   = (int)InpStagedMode;
    g_staged.armBars  = InpArmBars;
-   g_staged.rsiUpper = InpRsiUpper;
-   g_staged.rsiLower = InpRsiLower;
 
    g_rule1.period      = InpPeriod;
    g_rule1.lagBars     = InpLagBars;
-   g_rule1.useSqueeze  = InpUseSqueeze;
    g_rule1.squeezeBars = InpSqueezeBars;
    g_rule1.sigmaMult   = InpSigmaMult;
-   g_rule1.useExpand   = InpUseExpand;
    g_rule1.expandBars  = InpExpandBars;
 
    SetIndexBuffer(0, BufCenter, INDICATOR_DATA);
@@ -228,8 +246,10 @@ int OnInit()
    SetIndexBuffer(17, BufArm2,     INDICATOR_DATA);
    SetIndexBuffer(18, BufArmStage, INDICATOR_DATA);
    SetIndexBuffer(19, BufArmAge,   INDICATOR_DATA);
-   SetIndexBuffer(20, BufArmDir,   INDICATOR_CALCULATIONS);
-   SetIndexBuffer(21, BufPos,      INDICATOR_CALCULATIONS);
+   SetIndexBuffer(20, BufSarExitBuy,  INDICATOR_DATA);
+   SetIndexBuffer(21, BufSarExitSell, INDICATOR_DATA);
+   SetIndexBuffer(22, BufArmDir,   INDICATOR_CALCULATIONS);
+   SetIndexBuffer(23, BufPos,      INDICATOR_CALCULATIONS);
 
    for(int p = 0; p < 20; p++)
       PlotIndexSetDouble(p, PLOT_EMPTY_VALUE, EMPTY_VALUE);
@@ -245,6 +265,10 @@ int OnInit()
    PlotIndexSetInteger(14, PLOT_ARROW_SHIFT,  16);
    PlotIndexSetInteger(15, PLOT_ARROW, 251);  // ✗ 売りの決済
    PlotIndexSetInteger(15, PLOT_ARROW_SHIFT, -16);
+   PlotIndexSetInteger(20, PLOT_ARROW, 251);  // ✗ SAR での買いの決済
+   PlotIndexSetInteger(20, PLOT_ARROW_SHIFT,  16);
+   PlotIndexSetInteger(21, PLOT_ARROW, 251);  // ✗ SAR での売りの決済
+   PlotIndexSetInteger(21, PLOT_ARROW_SHIFT, -16);
    // 装填1 に 158（○）を使うと、同じ太さでも 159（●）より小さく描かれる。
    // 字そのものが小さいので太さでは埋められない。形の違う 110（■）にする
    PlotIndexSetInteger(16, PLOT_ARROW, 110);  // ■ 装填1
@@ -263,6 +287,8 @@ void OnDeinit(const int reason)
 {
    if(g_rsiHandle != INVALID_HANDLE)
       IndicatorRelease(g_rsiHandle);
+   if(g_sarHandle != INVALID_HANDLE)
+      IndicatorRelease(g_sarHandle);
 }
 
 //+------------------------------------------------------------------+
@@ -304,6 +330,8 @@ int OnCalculate(const int rates_total,
    ArraySetAsSeries(BufLagZ,   true);
    ArraySetAsSeries(BufExitBuy,  true);
    ArraySetAsSeries(BufExitSell, true);
+   ArraySetAsSeries(BufSarExitBuy,  true);
+   ArraySetAsSeries(BufSarExitSell, true);
    ArraySetAsSeries(BufArm1,     true);
    ArraySetAsSeries(BufArm2,     true);
    ArraySetAsSeries(BufArmStage, true);
@@ -352,6 +380,19 @@ int OnCalculate(const int rates_total,
          return 0;   // まだ揃っていない。次のティックで全て計算し直す
    }
 
+   // 決済に SAR を含むときだけ要る。EA は「1本前の確定足のポインタ」を
+   // その足のあいだ固定して使うので、足 i の判定には sar[i + 1] を見る。
+   // 1本ぶん余計に取るが、最初の全走査では limit + 2 が本数を超えるため
+   // 実在する分だけ取り、ループ側で範囲を確かめる
+   double sar[];
+   if(g_needSar)
+   {
+      ArraySetAsSeries(sar, true);
+      const int need = MathMin(limit + 2, rates_total);
+      if(CopyBuffer(g_sarHandle, 0, 0, need, sar) < need)
+         return 0;
+   }
+
    for(int i = limit; i >= 0; i--)
    {
       SBValues v;
@@ -385,8 +426,10 @@ int OnCalculate(const int rates_total,
       // に出すと足の途中で現れたり消えたりする値を EA の発火と見比べてしまう。
       BufBuy[i]       = EMPTY_VALUE;
       BufSell[i]      = EMPTY_VALUE;
-      BufExitBuy[i]   = EMPTY_VALUE;
-      BufExitSell[i]  = EMPTY_VALUE;
+      BufExitBuy[i]      = EMPTY_VALUE;
+      BufExitSell[i]     = EMPTY_VALUE;
+      BufSarExitBuy[i]   = EMPTY_VALUE;
+      BufSarExitSell[i]  = EMPTY_VALUE;
       BufC1[i]   = EMPTY_VALUE;
       BufC3[i]   = EMPTY_VALUE;
       BufC4[i]   = EMPTY_VALUE;
@@ -418,7 +461,7 @@ int OnCalculate(const int rates_total,
                // 装填2 へ進むかは、装填1 の向きで決済条件を見る。決済の
                // 方式は入力で選んだものをそのまま使う
                const bool stopHit =
-                  SB_StagedStopHit(close, i, InpPeriod, InpLagBars, InpExit, g_staged, arm);
+                  SB_StagedStopHit(close, i, InpPeriod, InpLagBars, g_staged, arm);
 
                SBStagedResult stg;
                SB_StagedStep(s, rsi[i], stopHit, g_staged, arm, stg);
@@ -438,13 +481,40 @@ int OnCalculate(const int rates_total,
          if(pos != 0)
          {
             const bool wasLong = (pos > 0);
-            bool doExit = false;
-            const bool hit = SB_Rule1Exit(close, i, InpPeriod, InpLagBars, InpExit, wasLong, doExit) && doExit;
 
-            if(hit)
+            bool lagHit = false;
+            if(InpExitMode != R1_EXIT_SAR)
             {
-               if(wasLong) BufExitBuy[i]  = low[i];
-               else        BufExitSell[i] = high[i];
+               bool doExit = false;
+               lagHit = SB_Rule1Exit(close, i, InpPeriod, InpLagBars, wasLong, doExit) && doExit;
+            }
+
+            // EA は足の途中で切られる（逆指値か Bid 判定）。ここは確定足しか
+            // 見られないので、「その足がポインタに触れたか」で近似する。
+            // 売り側のスプレッド補正は入れていない（EA より 1〜2 pips 早く
+            // 切れる足がまれに出る）
+            bool sarHit = false;
+            if(g_needSar && i + 1 < ArraySize(sar))
+            {
+               const double level = sar[i + 1];
+               if(level > 0.0)
+                  sarHit = wasLong ? (low[i] <= level) : (high[i] >= level);
+            }
+
+            if(lagHit || sarHit)
+            {
+               // 同じ足で両方成立したら SAR 側に出す。EA では足の途中で動く
+               // SAR のほうが先に効く
+               if(sarHit)
+               {
+                  if(wasLong) BufSarExitBuy[i]  = low[i];
+                  else        BufSarExitSell[i] = high[i];
+               }
+               else
+               {
+                  if(wasLong) BufExitBuy[i]  = low[i];
+                  else        BufExitSell[i] = high[i];
+               }
                pos = 0;
             }
          }

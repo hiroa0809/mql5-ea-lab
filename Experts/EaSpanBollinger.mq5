@@ -27,15 +27,11 @@
 #include <Trade\Trade.mqh>
 #include <Signals\SuperBollinger.mqh>
 
-//--- パラボリック SAR による決済。執行の話なので Signals 側には置かない
-//    （SuperBollinger.mqh は指標とEAで共有する条件式だけを持つ）
-enum ENUM_SAR_MODE
-{
-   SAR_MODE_OFF  = 0,   // 使わない（既存の決済条件のみ）
-   SAR_MODE_ONLY = 1,   // SAR のみ
-   SAR_MODE_BOTH = 2    // 併用（どちらか早いほう）
-};
-
+//| 決済方式（遅行スパンの陰転 / SAR / 併用）は ENUM_R1_EXIT として
+//| SuperBollinger.mqh にある。インジケーターと共有するため。
+//|
+//| 執行方式はここに置く。EA だけの話（インジケーターは注文を出さない）。
+//|
 //| サーバーの逆指値は EA が止まっても効くがスプレッド拡大で刺さる。   |
 //| Bid 判定は刺さらないが EA が動いている必要があり、決済は Ask で    |
 //| 約定する。どちらが勝つかは学習期間で比較して決める。               |
@@ -53,12 +49,13 @@ input bool   InpReverseOnOpposite = true;      // 反対シグナルでドテン
 //--- ルール1: スーパーボリンジャー
 input int    InpR1_Period      = 21;     // 期間（センターラインとσ）
 input int    InpR1_LagBars     = 21;     // 遅行線の本数
-input bool   InpR1_UseSqueeze  = true;   // ①膠着を条件に入れる
 input int    InpR1_SqueezeBars = 21;     // ①膠着とみなす本数（この本数ぶん帯の内側）
 input double InpR1_SigmaMult   = 3.0;    // ①③で使うσの倍数
-input bool   InpR1_UseExpand   = true;   // ④バンド幅の拡大を条件に入れる
 input int    InpR1_ExpandBars  = 3;      // ④拡大を見る本数
-input ENUM_SB_EXIT InpR1_Exit  = SB_EXIT_CLOSE_SIGMA1;  // 決済の方式
+// 旧 InpR1_Exit（A/B/C）と旧 InpR1_SarMode を1つにまとめた（2026-08-13）。
+// 名前を変えてあるのは、古い .set に残る InpR1_Exit=2（旧C）が新しい 2
+// （併用）として黙って読まれるのを防ぐため（docs/lessons_learned.md）
+input ENUM_R1_EXIT InpR1_ExitMode = R1_EXIT_LAG_FLIP;  // 決済の方式
 input bool   InpR1_UseSL       = false;  // 損切りを使う
 input double InpR1_SLSigma     = 2.0;    // 損切り（σの何倍）
 input bool   InpR1_UseTimeStop = false;  // 保有本数で手仕舞う
@@ -67,12 +64,8 @@ input int    InpR1_HoldBars    = 24;     // 手仕舞うまでの本数
 //--- 段階エントリー。既定は「使わない」＝従来どおりの動き
 input ENUM_SB_STAGED InpR1_StagedMode = SB_STAGED_OFF;  // 段階エントリー
 input int    InpR1_ArmBars     = 42;     // 装填が生きている本数（装填1 から数える）
-input int    InpR1_RsiPeriod   = 14;     // RSI の期間（段階エントリーの見送り判定に使う）
-input double InpR1_RsiUpper    = 80.0;   // 買いの発火を見送る RSI（これ以上なら入らない）
-input double InpR1_RsiLower    = 20.0;   // 売りの発火を見送る RSI（これ以下なら入らない）
 
-//--- パラボリック SAR。既定は「使わない」＝従来どおりの動き
-input ENUM_SAR_MODE InpR1_SarMode = SAR_MODE_OFF;   // SAR で決済する
+//--- パラボリック SAR。決済に SAR を含めたときだけ効く
 input ENUM_SAR_EXEC InpR1_SarExec = SAR_EXEC_STOP;  // SAR の執行方式
 input double InpR1_SarStep      = 0.01;  // SAR のステップ（食いつきの刻み）
 input double InpR1_SarMax       = 0.20;  // SAR の最大（食いつきの頭打ち）
@@ -206,18 +199,7 @@ int OnInit()
 
    if(g_needRsi)
    {
-      if(InpR1_RsiPeriod < 2)
-      {
-         Print("RSI の期間は 2 以上にしてください");
-         return INIT_PARAMETERS_INCORRECT;
-      }
-      if(!(InpR1_RsiLower > 0.0 && InpR1_RsiLower < InpR1_RsiUpper && InpR1_RsiUpper < 100.0))
-      {
-         Print("RSI の閾値は 0 < 売り側 < 買い側 < 100 にしてください");
-         return INIT_PARAMETERS_INCORRECT;
-      }
-
-      g_rsiHandle = iRSI(_Symbol, _Period, InpR1_RsiPeriod, PRICE_CLOSE);
+      g_rsiHandle = iRSI(_Symbol, _Period, SB_RSI_PERIOD, PRICE_CLOSE);
       if(g_rsiHandle == INVALID_HANDLE)
       {
          PrintFormat("RSI を作成できませんでした (error=%d)", GetLastError());
@@ -225,7 +207,7 @@ int OnInit()
       }
    }
 
-   g_needSar = (InpR1_SarMode != SAR_MODE_OFF || InpR1_SarEntryGate);
+   g_needSar = (InpR1_ExitMode != R1_EXIT_LAG_FLIP || InpR1_SarEntryGate);
 
    if(g_needSar)
    {
@@ -247,7 +229,7 @@ int OnInit()
       // どちらも建玉の同じ損切り価格を書くため、後から置いたほうが黙って
       // もう一方を消す。CSV には両方の設定が残るので、結果から条件を
       // 再現できなくなる。混ぜた挙動を新たに定義せず、起動時に弾く
-      if(InpR1_UseSL && InpR1_SarMode != SAR_MODE_OFF && InpR1_SarExec == SAR_EXEC_STOP)
+      if(InpR1_UseSL && InpR1_ExitMode != R1_EXIT_LAG_FLIP && InpR1_SarExec == SAR_EXEC_STOP)
       {
          Print("σ の損切りと SAR の逆指値は同時に使えません。どちらか片方にしてください");
          return INIT_PARAMETERS_INCORRECT;
@@ -264,23 +246,19 @@ int OnInit()
       // 一度も起きない。推測せずに実測値を残す
       g_sarStopsLevel = (int)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
       PrintFormat("[SAR] %s の最小距離 %d ポイント / 方式 %s / 執行 %s",
-                  _Symbol, g_sarStopsLevel, SarModeName(InpR1_SarMode), SarExecName(InpR1_SarExec));
+                  _Symbol, g_sarStopsLevel, ExitName(InpR1_ExitMode), SarExecName(InpR1_SarExec));
    }
 
    g_staged.stages   = (int)InpR1_StagedMode;
    g_staged.armBars  = InpR1_ArmBars;
-   g_staged.rsiUpper = InpR1_RsiUpper;
-   g_staged.rsiLower = InpR1_RsiLower;
    g_arm.stage       = 0;
    g_arm.dir         = 0;
    g_arm.age         = 0;
 
    g_rule1.period      = InpR1_Period;
    g_rule1.lagBars     = InpR1_LagBars;
-   g_rule1.useSqueeze  = InpR1_UseSqueeze;
    g_rule1.squeezeBars = InpR1_SqueezeBars;
    g_rule1.sigmaMult   = InpR1_SigmaMult;
-   g_rule1.useExpand   = InpR1_UseExpand;
    g_rule1.expandBars  = InpR1_ExpandBars;
 
    // 必要な履歴本数は入力値から計算する。固定値を書くと、期間を変えた
@@ -334,7 +312,7 @@ void OnDeinit(const int reason)
    PrintFormat("[ルール1] 3つ揃った %d   買い %d / 売り %d",
                g_cntSignal, g_cntBuy, g_cntSell);
    PrintFormat("[ルール1] 損切りを最小距離まで広げた %d", g_cntWidened);
-   PrintFormat("[ルール1] 決済の方式: %s", ExitName(InpR1_Exit));
+   PrintFormat("[ルール1] 決済の方式: %s", ExitName(InpR1_ExitMode));
 
    if(InpR1_StagedMode != SB_STAGED_OFF)
    {
@@ -346,7 +324,7 @@ void OnDeinit(const int reason)
    if(g_needSar)
    {
       PrintFormat("[SAR] 方式: %s / 執行: %s / ステップ %.2f / 最大 %.2f",
-                  SarModeName(InpR1_SarMode), SarExecName(InpR1_SarExec),
+                  ExitName(InpR1_ExitMode), SarExecName(InpR1_SarExec),
                   InpR1_SarStep, InpR1_SarMax);
       PrintFormat("[SAR] 最小距離 %d ポイント（0 なら押し戻しは起きない）", g_sarStopsLevel);
       PrintFormat("[SAR] 損切りを書き換えた %d / 最小距離まで押し戻した %d / 緩くなるので据え置いた %d",
@@ -415,7 +393,7 @@ void OnTick()
       // 装填2 へ進むかは、装填1 の向きで決済条件を見る。決済の方式は
       // 入力で選んだものをそのまま使う
       const bool stopHit =
-         SB_StagedStopHit(close, 1, InpR1_Period, InpR1_LagBars, InpR1_Exit, g_staged, g_arm);
+         SB_StagedStopHit(close, 1, InpR1_Period, InpR1_LagBars, g_staged, g_arm);
 
       SBStagedResult stg;
       SB_StagedStep(s, rsi1, stopHit, g_staged, g_arm, stg);
@@ -469,13 +447,14 @@ void OnTick()
       if(InpR1_UseTimeStop && g_barsHeld >= InpR1_HoldBars)
          reason = StringFormat("保有 %d 本で時間切れ", g_barsHeld);
 
-      // SAR のみを試すときは既存の決済条件を止める。併用なら両方見て、
-      // 先に成立したほうで抜ける
-      if(reason == "" && InpR1_SarMode != SAR_MODE_ONLY)
+      // SAR のみを試すときは遅行スパンの陰転を止める。併用なら両方見て、
+      // 先に成立したほうで抜ける。理由は方式名ではなく成立した条件を書く
+      // （併用のとき「併用で決済」では、どちらが効いたか集計できない）
+      if(reason == "" && InpR1_ExitMode != R1_EXIT_SAR)
       {
          bool hit;
-         if(SB_Rule1Exit(close, 1, InpR1_Period, InpR1_LagBars, InpR1_Exit, dir > 0, hit) && hit)
-            reason = ExitName(InpR1_Exit);
+         if(SB_Rule1Exit(close, 1, InpR1_Period, InpR1_LagBars, dir > 0, hit) && hit)
+            reason = "遅行スパンが反対側へ陰転した";
       }
 
       // ルール1では、反対シグナルが出るころには上の手仕舞いが先に成立して
@@ -489,7 +468,7 @@ void OnTick()
          dir = 0;
 
       // 決済しなかったなら、損切りをポインタの位置まで引き上げる
-      if(dir != 0 && InpR1_SarMode != SAR_MODE_OFF && InpR1_SarExec == SAR_EXEC_STOP)
+      if(dir != 0 && InpR1_ExitMode != R1_EXIT_LAG_FLIP && InpR1_SarExec == SAR_EXEC_STOP)
          SarTrailUpdate(dir);
    }
 
@@ -587,15 +566,13 @@ void WriteCsv()
    FileWrite(fs, "period",        EnumToString((ENUM_TIMEFRAMES)_Period));
    FileWrite(fs, "digits",        _Digits);
    FileWrite(fs, "point",         DoubleToString(_Point, 8));
-   FileWrite(fs, "exit_method",   (int)InpR1_Exit);
-   FileWrite(fs, "exit_name",     ExitName(InpR1_Exit));
+   FileWrite(fs, "exit_method",   (int)InpR1_ExitMode);
+   FileWrite(fs, "exit_name",     ExitName(InpR1_ExitMode));
    FileWrite(fs, "period_bars",   InpR1_Period);
    FileWrite(fs, "lag_bars",      InpR1_LagBars);
    FileWrite(fs, "squeeze_bars",  InpR1_SqueezeBars);
    FileWrite(fs, "sigma_mult",    DoubleToString(InpR1_SigmaMult, 2));
    FileWrite(fs, "expand_bars",   InpR1_ExpandBars);
-   FileWrite(fs, "use_squeeze",   InpR1_UseSqueeze ? 1 : 0);
-   FileWrite(fs, "use_expand",    InpR1_UseExpand ? 1 : 0);
    FileWrite(fs, "use_sl",        InpR1_UseSL ? 1 : 0);
    // 売買結果を変える入力は全部残す。無いと保存した結果から条件を再現できない
    FileWrite(fs, "sl_sigma",      DoubleToString(InpR1_SLSigma, 2));
@@ -614,16 +591,11 @@ void WriteCsv()
    FileWrite(fs, "staged_mode",   (int)InpR1_StagedMode);
    FileWrite(fs, "staged_name",   StagedName(InpR1_StagedMode));
    FileWrite(fs, "arm_bars",      InpR1_ArmBars);
-   FileWrite(fs, "rsi_period",    InpR1_RsiPeriod);
-   FileWrite(fs, "rsi_upper",     DoubleToString(InpR1_RsiUpper, 1));
-   FileWrite(fs, "rsi_lower",     DoubleToString(InpR1_RsiLower, 1));
    FileWrite(fs, "armed1",        g_cntArm1);
    FileWrite(fs, "armed2",        g_cntArm2);
    FileWrite(fs, "fired",         g_cntFired);
    FileWrite(fs, "rsi_blocked",   g_cntRsiBlocked);
    FileWrite(fs, "arm_expired",   g_cntExpired);
-   FileWrite(fs, "sar_mode",      (int)InpR1_SarMode);
-   FileWrite(fs, "sar_mode_name", SarModeName(InpR1_SarMode));
    FileWrite(fs, "sar_exec",      (int)InpR1_SarExec);
    FileWrite(fs, "sar_exec_name", SarExecName(InpR1_SarExec));
    FileWrite(fs, "sar_step",      DoubleToString(InpR1_SarStep, 3));
@@ -646,11 +618,11 @@ void WriteCsv()
 //+------------------------------------------------------------------+
 //| 決済方式の名前。ログで決済理由をそのまま読めるようにする          |
 //+------------------------------------------------------------------+
-string ExitName(const ENUM_SB_EXIT method)
+string ExitName(const ENUM_R1_EXIT mode)
 {
-   if(method == SB_EXIT_CLOSE_SIGMA1) return "終値が 1σ の内側へ戻った";
-   if(method == SB_EXIT_LAG_SIGMA1)   return "遅行スパンが 1σ の内側へ戻った";
-   return "遅行スパンが反対側へ陰転した";
+   if(mode == R1_EXIT_LAG_FLIP) return "遅行スパンが反対側へ陰転";
+   if(mode == R1_EXIT_SAR)      return "パラボリック SAR";
+   return "併用（陰転と SAR の早いほう）";
 }
 
 //+------------------------------------------------------------------+
@@ -662,14 +634,6 @@ string StagedName(const ENUM_SB_STAGED mode)
    if(mode == SB_STAGED_OFF) return "使わない";
    if(mode == SB_STAGED_1)   return "装填1 → 発火";
    return "装填1 → 装填2 → 発火";
-}
-
-//+------------------------------------------------------------------+
-string SarModeName(const ENUM_SAR_MODE mode)
-{
-   if(mode == SAR_MODE_OFF)  return "使わない";
-   if(mode == SAR_MODE_ONLY) return "SAR のみ";
-   return "併用（どちらか早いほう）";
 }
 
 //+------------------------------------------------------------------+
@@ -838,7 +802,7 @@ void SarTrailUpdate(const int dir)
 //+------------------------------------------------------------------+
 void SarTickExit()
 {
-   if(InpR1_SarMode == SAR_MODE_OFF || InpR1_SarExec != SAR_EXEC_BID)
+   if(InpR1_ExitMode == R1_EXIT_LAG_FLIP || InpR1_SarExec != SAR_EXEC_BID)
       return;
 
    ulong ticket = 0;
@@ -958,7 +922,7 @@ void OpenMarket(const int dir, const double &close[])
 
    // SAR をサーバーの逆指値で使うなら、建玉と同時に置く。次の足の更新まで
    // 待つと最初の1本だけ無防備になり、Bid 判定と条件が揃わなくなる
-   if(InpR1_SarMode != SAR_MODE_OFF && InpR1_SarExec == SAR_EXEC_STOP)
+   if(InpR1_ExitMode != R1_EXIT_LAG_FLIP && InpR1_SarExec == SAR_EXEC_STOP)
    {
       double sarSL;
       if(SarStopPrice(dir, sarSL))
@@ -1020,7 +984,7 @@ bool ClosingDeal(const long posId, double &price, long &reason)
 string DealReasonName(const long reason)
 {
    if(reason == DEAL_REASON_SL)
-      return (InpR1_SarMode != SAR_MODE_OFF && InpR1_SarExec == SAR_EXEC_STOP)
+      return (InpR1_ExitMode != R1_EXIT_LAG_FLIP && InpR1_SarExec == SAR_EXEC_STOP)
              ? "SAR（サーバー逆指値）" : "損切り";
    if(reason == DEAL_REASON_TP) return "利確";
    if(reason == DEAL_REASON_SO) return "証拠金不足による強制決済";
