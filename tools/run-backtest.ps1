@@ -45,7 +45,17 @@ param(
     [int]$RsiPeriod   = 14,                       # RSI の期間
     [double]$RsiUpper = 80,                       # 買いの発火を見送る RSI
     [double]$RsiLower = 20,                       # 売りの発火を見送る RSI
-    [int]$Model       = 2,                        # 2=始値のみ（本 EA は足の始値でしか売買しないため過不足なし）
+    [int]$SarMode     = 0,                        # SAR で決済する 0=使わない 1=SARのみ 2=併用
+    [int]$SarExec     = 0,                        # SAR の執行方式 0=サーバーの逆指値 1=Bid判定
+    [double]$SarStep  = 0.01,                     # SAR のステップ
+    [double]$SarMax   = 0.20,                     # SAR の最大
+    [int]$SarEntryGate = 0,                       # ポインタが正しい側になるまで入らない
+    # 2=始値のみ。SAR を使わない設定では、本 EA は足の始値でしか売買しない
+    # ため過不足ない。**SAR を使うときは 4（実際のティックに基づく全ティック）
+    # にすること。** 2 では OnTick が足に1回しか来ないため Bid 判定が
+    # 「足の始値で1回」に退化し、スプレッド拡大も再現されない。この2点は
+    # まさに執行方式の比較で見たい対象そのもの
+    [int]$Model       = 2,
     [int]$TimeoutMin  = 120,
     [int]$WaitFreeSec = 90,                       # 同じ端末が空くまで待つ秒数
     [string]$Terminal = 'C:\Program Files\XM Trading MT5\terminal64.exe'
@@ -116,11 +126,16 @@ InpR1_ArmBars=$ArmBars
 InpR1_RsiPeriod=$RsiPeriod
 InpR1_RsiUpper=$RsiUpper
 InpR1_RsiLower=$RsiLower
+InpR1_SarMode=$SarMode
+InpR1_SarExec=$SarExec
+InpR1_SarStep=$SarStep
+InpR1_SarMax=$SarMax
+InpR1_SarEntryGate=$SarEntryGate
 InpRunTag=$Tag
 "@ | Set-Content -Path $ini -Encoding ASCII
 
 Write-Host "設定: $ini"
-Write-Host "実行: $Symbol $Period  $From 〜 $To  決済方式=$Exit  段階=$StagedMode  RSI=$RsiUpper/$RsiLower  識別名=$Tag"
+Write-Host "実行: $Symbol $Period  $From 〜 $To  決済方式=$Exit  段階=$StagedMode  RSI=$RsiUpper/$RsiLower  SAR=$SarMode/$SarExec/ゲート$SarEntryGate  ティック=$Model  識別名=$Tag"
 
 $beforeTrades  = @(Get-ChildItem $common -Filter "r1_${Tag}_trades*.csv"  -ErrorAction SilentlyContinue).Count
 $beforeSummary = @(Get-ChildItem $common -Filter "r1_${Tag}_summary*.csv" -ErrorAction SilentlyContinue).Count
