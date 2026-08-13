@@ -27,6 +27,24 @@
 #include <Trade\Trade.mqh>
 #include <Signals\SuperBollinger.mqh>
 
+//--- パラボリック SAR による決済。執行の話なので Signals 側には置かない
+//    （SuperBollinger.mqh は指標とEAで共有する条件式だけを持つ）
+enum ENUM_SAR_MODE
+{
+   SAR_MODE_OFF  = 0,   // 使わない（既存の決済条件のみ）
+   SAR_MODE_ONLY = 1,   // SAR のみ
+   SAR_MODE_BOTH = 2    // 併用（どちらか早いほう）
+};
+
+//| サーバーの逆指値は EA が止まっても効くがスプレッド拡大で刺さる。   |
+//| Bid 判定は刺さらないが EA が動いている必要があり、決済は Ask で    |
+//| 約定する。どちらが勝つかは学習期間で比較して決める。               |
+enum ENUM_SAR_EXEC
+{
+   SAR_EXEC_STOP = 0,   // サーバーの逆指値
+   SAR_EXEC_BID  = 1    // Bid 判定して成行決済
+};
+
 //--- 共通
 input double InpLots              = 0.10;      // ロット
 input long   InpMagic             = 20260808;  // マジックナンバー
@@ -53,6 +71,13 @@ input int    InpR1_RsiPeriod   = 14;     // RSI の期間（段階エントリ�
 input double InpR1_RsiUpper    = 80.0;   // 買いの発火を見送る RSI（これ以上なら入らない）
 input double InpR1_RsiLower    = 20.0;   // 売りの発火を見送る RSI（これ以下なら入らない）
 
+//--- パラボリック SAR。既定は「使わない」＝従来どおりの動き
+input ENUM_SAR_MODE InpR1_SarMode = SAR_MODE_OFF;   // SAR で決済する
+input ENUM_SAR_EXEC InpR1_SarExec = SAR_EXEC_STOP;  // SAR の執行方式
+input double InpR1_SarStep      = 0.01;  // SAR のステップ（食いつきの刻み）
+input double InpR1_SarMax       = 0.20;  // SAR の最大（食いつきの頭打ち）
+input bool   InpR1_SarEntryGate = false; // ポインタが正しい側になるまで入らない
+
 //--- 診断
 input bool   InpPrintCounters = true;    // 条件別の成立回数を出力する
 input string InpRunTag        = "";      // 実行の識別名（空なら CSV を書かない）
@@ -62,11 +87,19 @@ SBRule1Params  g_rule1;
 SBStagedParams g_staged;
 SBArmState     g_arm;
 int            g_rsiHandle   = INVALID_HANDLE;
+int            g_sarHandle   = INVALID_HANDLE;
 bool           g_needRsi     = false;   // 段階エントリーの発火を見送るかの判定に RSI を使う
+bool           g_needSar     = false;
 datetime       g_lastBarTime = 0;
 ulong          g_posTicket   = 0;
+long           g_posId       = 0;   // 決済履歴を引くための建玉ID
 int            g_barsHeld    = 0;
 int            g_needBars    = 0;
+
+//--- ポインタが逆側だったときの待機。発火した向きを覚えておき、正しい側へ
+//    来た足で入る。期限は装填と同じ本数を使う（新しいつまみを増やさない）
+int            g_sarWaitDir  = 0;
+int            g_sarWaitAge  = 0;
 
 //--- 診断カウンタ。各条件は他の条件の成否と無関係に数える
 //    （docs/implementation_design.md §4）
@@ -79,6 +112,16 @@ int g_cntWidened = 0;   // 損切りを最小距離まで広げた回数
 //    装填2・発火まで進んだか（どこで落ちたか）で判断する
 int g_cntArm1 = 0, g_cntArm2 = 0, g_cntFired = 0;
 int g_cntRsiBlocked = 0, g_cntExpired = 0;
+
+//--- SAR の内訳。ユーザーの目視では「ポインタは常にエントリーの反対側」
+//    だったが、100例の観察でしかない。実測して確定させる
+int g_sarStopsLevel   = 0;   // ブローカーの最小距離（ポイント）。0 なら論点そのものが無い
+int g_cntSarModify    = 0;   // 損切りを書き換えた回数
+int g_cntSarClamped   = 0;   // 最小距離まで押し戻した回数
+int g_cntSarSkipped   = 0;   // 前回より緩くなるため書き換えなかった回数
+int g_cntSarBlocked   = 0;   // ポインタが逆側で発火を見送った回数
+int g_cntSarWaitFired = 0;   // 待機後、ポインタが反転して入れた回数
+int g_cntSarWaitExp   = 0;   // 待機のまま期限切れになった回数
 
 //--- 1取引ぶんの記録。グロス損益はスプレッドを足し戻して求めるので、
 //    建玉時と決済時のスプレッドを両方持つ（値の解釈は集計側で行う）
@@ -180,6 +223,30 @@ int OnInit()
       }
    }
 
+   g_needSar = (InpR1_SarMode != SAR_MODE_OFF || InpR1_SarEntryGate);
+
+   if(g_needSar)
+   {
+      if(!(InpR1_SarStep > 0.0 && InpR1_SarStep <= InpR1_SarMax))
+      {
+         Print("SAR は 0 < ステップ <= 最大 にしてください");
+         return INIT_PARAMETERS_INCORRECT;
+      }
+
+      g_sarHandle = iSAR(_Symbol, _Period, InpR1_SarStep, InpR1_SarMax);
+      if(g_sarHandle == INVALID_HANDLE)
+      {
+         PrintFormat("パラボリック SAR を作成できませんでした (error=%d)", GetLastError());
+         return INIT_FAILED;
+      }
+
+      // 最小距離は「損切りをここまで押し戻す」の基準。0 なら押し戻しは
+      // 一度も起きない。推測せずに実測値を残す
+      g_sarStopsLevel = (int)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
+      PrintFormat("[SAR] %s の最小距離 %d ポイント / 方式 %s / 執行 %s",
+                  _Symbol, g_sarStopsLevel, SarModeName(InpR1_SarMode), SarExecName(InpR1_SarExec));
+   }
+
    g_staged.stages   = (int)InpR1_StagedMode;
    g_staged.armBars  = InpR1_ArmBars;
    g_staged.rsiUpper = InpR1_RsiUpper;
@@ -232,6 +299,8 @@ void OnDeinit(const int reason)
 
    if(g_rsiHandle != INVALID_HANDLE)
       IndicatorRelease(g_rsiHandle);
+   if(g_sarHandle != INVALID_HANDLE)
+      IndicatorRelease(g_sarHandle);
    Comment("");
 
    if(!InpPrintCounters)
@@ -253,6 +322,18 @@ void OnDeinit(const int reason)
       PrintFormat("[段階] 装填1 %d → 装填2 %d → 発火 %d", g_cntArm1, g_cntArm2, g_cntFired);
       PrintFormat("[段階] RSIで見送り %d / 期限切れ %d", g_cntRsiBlocked, g_cntExpired);
    }
+
+   if(g_needSar)
+   {
+      PrintFormat("[SAR] 方式: %s / 執行: %s / ステップ %.2f / 最大 %.2f",
+                  SarModeName(InpR1_SarMode), SarExecName(InpR1_SarExec),
+                  InpR1_SarStep, InpR1_SarMax);
+      PrintFormat("[SAR] 最小距離 %d ポイント（0 なら押し戻しは起きない）", g_sarStopsLevel);
+      PrintFormat("[SAR] 損切りを書き換えた %d / 最小距離まで押し戻した %d / 緩くなるので据え置いた %d",
+                  g_cntSarModify, g_cntSarClamped, g_cntSarSkipped);
+      PrintFormat("[SAR] ポインタが逆側で見送った %d → 反転して入れた %d / 期限切れ %d",
+                  g_cntSarBlocked, g_cntSarWaitFired, g_cntSarWaitExp);
+   }
 }
 
 //+------------------------------------------------------------------+
@@ -261,6 +342,12 @@ void OnDeinit(const int reason)
 //+------------------------------------------------------------------+
 void OnTick()
 {
+   // Bid 判定だけは足の途中で動く。トレーリングストップは本質的に足を
+   // またぐので、「判定は確定足のみ」（trading_rules.md §2.1）が想定して
+   // いなかったケースにあたる。見る値そのものは確定足のポインタなので、
+   // サーバーの逆指値と完全に同じ水準を見ている
+   SarTickExit();
+
    if(!IsNewBar())
       return;
 
@@ -332,13 +419,26 @@ void OnTick()
       }
    }
 
+   //--- ポインタが正しい側に無ければ入らない。逆側なら向きを覚えて待機し、
+   //    反転した足で入る（期限は装填と同じ本数）
+   if(InpR1_SarEntryGate)
+      SarEntryGate(close[1], entryBuy, entrySell);
+
    //--- 手仕舞いが先。抜けた足で反対の発注も出ていればドテンになる
    int dir = CurrentPositionDir(g_posTicket);
 
    // 自分の決済以外で建玉が消えていたら（サーバー側の損切りなど）記録を閉じる。
-   // 決済価格は取れないので 0 のままにし、集計側で除外できるようにする
+   // SAR をサーバーの逆指値で置く場合は決済がすべてここを通るので、履歴から
+   // 実際の決済価格を引く。0 のままにすると、比べたい方式の成績が出せない
    if(dir == 0 && g_hasOpenRow)
-      RecordTrade(0.0, "EA 以外の要因（損切りなど）");
+   {
+      double closePrice = 0.0;
+      long   dealReason = -1;
+      if(ClosingDeal(g_posId, closePrice, dealReason))
+         RecordTrade(closePrice, DealReasonName(dealReason));
+      else
+         RecordTrade(0.0, "EA 以外の要因（決済価格を取得できず）");
+   }
 
    if(dir != 0)
    {
@@ -348,7 +448,9 @@ void OnTick()
       if(InpR1_UseTimeStop && g_barsHeld >= InpR1_HoldBars)
          reason = StringFormat("保有 %d 本で時間切れ", g_barsHeld);
 
-      if(reason == "")
+      // SAR のみを試すときは既存の決済条件を止める。併用なら両方見て、
+      // 先に成立したほうで抜ける
+      if(reason == "" && InpR1_SarMode != SAR_MODE_ONLY)
       {
          bool hit;
          if(SB_Rule1Exit(close, 1, InpR1_Period, InpR1_LagBars, InpR1_Exit, dir > 0, hit) && hit)
@@ -364,6 +466,10 @@ void OnTick()
 
       if(reason != "" && ClosePosition(reason))
          dir = 0;
+
+      // 決済しなかったなら、損切りをポインタの位置まで引き上げる
+      if(dir != 0 && InpR1_SarMode != SAR_MODE_OFF && InpR1_SarExec == SAR_EXEC_STOP)
+         SarTrailUpdate(dir);
    }
 
    //--- 建玉は1つまで。保有中に出た同じ向きの発注は無視する
@@ -492,6 +598,20 @@ void WriteCsv()
    FileWrite(fs, "fired",         g_cntFired);
    FileWrite(fs, "rsi_blocked",   g_cntRsiBlocked);
    FileWrite(fs, "arm_expired",   g_cntExpired);
+   FileWrite(fs, "sar_mode",      (int)InpR1_SarMode);
+   FileWrite(fs, "sar_mode_name", SarModeName(InpR1_SarMode));
+   FileWrite(fs, "sar_exec",      (int)InpR1_SarExec);
+   FileWrite(fs, "sar_exec_name", SarExecName(InpR1_SarExec));
+   FileWrite(fs, "sar_step",      DoubleToString(InpR1_SarStep, 3));
+   FileWrite(fs, "sar_max",       DoubleToString(InpR1_SarMax, 3));
+   FileWrite(fs, "sar_entry_gate", InpR1_SarEntryGate ? 1 : 0);
+   FileWrite(fs, "stops_level_pt", g_sarStopsLevel);
+   FileWrite(fs, "sar_modified",  g_cntSarModify);
+   FileWrite(fs, "sar_clamped",   g_cntSarClamped);
+   FileWrite(fs, "sar_skipped",   g_cntSarSkipped);
+   FileWrite(fs, "sar_blocked",   g_cntSarBlocked);
+   FileWrite(fs, "sar_wait_fired", g_cntSarWaitFired);
+   FileWrite(fs, "sar_wait_expired", g_cntSarWaitExp);
    FileWrite(fs, "trades",        rows);
    FileClose(fs);
 
@@ -517,6 +637,170 @@ string StagedName(const ENUM_SB_STAGED mode)
    if(mode == SB_STAGED_OFF) return "使わない";
    if(mode == SB_STAGED_1)   return "装填1 → 発火";
    return "装填1 → 装填2 → 発火";
+}
+
+//+------------------------------------------------------------------+
+string SarModeName(const ENUM_SAR_MODE mode)
+{
+   if(mode == SAR_MODE_OFF)  return "使わない";
+   if(mode == SAR_MODE_ONLY) return "SAR のみ";
+   return "併用（どちらか早いほう）";
+}
+
+//+------------------------------------------------------------------+
+string SarExecName(const ENUM_SAR_EXEC exec)
+{
+   if(exec == SAR_EXEC_STOP) return "サーバーの逆指値";
+   return "Bid 判定して成行決済";
+}
+
+//+------------------------------------------------------------------+
+//| 確定足（shift = 1）のポインタの値                                |
+//|                                                                  |
+//| サーバーの逆指値と Bid 判定が同じ値を見るように、両方ここを通す。 |
+//| 別々に読むと、比較で出た差が執行方式の違いなのか読み取り位置の   |
+//| 違いなのか分離できない。                                         |
+//+------------------------------------------------------------------+
+bool SarValue(double &value)
+{
+   if(g_sarHandle == INVALID_HANDLE)
+      return false;
+
+   double buf[];
+   if(CopyBuffer(g_sarHandle, 0, 1, 1, buf) < 1)
+      return false;
+
+   value = buf[0];
+   return true;
+}
+
+//+------------------------------------------------------------------+
+//| ポインタが正しい側に無ければ入らない                             |
+//|                                                                  |
+//| 買いならポインタは終値より下、売りなら上にあるのが正常。逆側だと |
+//| そもそも損切りとして置けない（MT5 は買いの損切りを現在値より下に |
+//| しか置かせない）。逆側なら向きを覚えて待機し、反転した足で入る。 |
+//| 期限は装填が生きている本数を流用する。                           |
+//+------------------------------------------------------------------+
+void SarEntryGate(const double close1, bool &entryBuy, bool &entrySell)
+{
+   double sar1;
+   if(!SarValue(sar1))
+      return;
+
+   const bool okBuy  = (sar1 < close1);
+   const bool okSell = (sar1 > close1);
+
+   //--- 先に待機の消化。新しい発火より前に見ないと、同じ足で始めた待機を
+   //    その場で判定してしまう
+   if(g_sarWaitDir != 0)
+   {
+      g_sarWaitAge++;
+
+      if((g_sarWaitDir > 0 && okBuy) || (g_sarWaitDir < 0 && okSell))
+      {
+         if(g_sarWaitDir > 0) entryBuy = true; else entrySell = true;
+         g_cntSarWaitFired++;
+         g_sarWaitDir = 0;
+      }
+      else if(g_sarWaitAge >= InpR1_ArmBars)
+      {
+         g_cntSarWaitExp++;
+         g_sarWaitDir = 0;
+      }
+   }
+
+   //--- 新しい発火。逆側なら見送って待機に入る
+   if(entryBuy && !okBuy)
+   {
+      entryBuy     = false;
+      g_sarWaitDir = +1;
+      g_sarWaitAge = 0;
+      g_cntSarBlocked++;
+   }
+   if(entrySell && !okSell)
+   {
+      entrySell    = false;
+      g_sarWaitDir = -1;
+      g_sarWaitAge = 0;
+      g_cntSarBlocked++;
+   }
+}
+
+//+------------------------------------------------------------------+
+//| 損切りをポインタの位置まで引き上げる（サーバーの逆指値）         |
+//|                                                                  |
+//| 売り建玉の逆指値は Ask で発動する。ポインタは Bid のチャートから |
+//| 出た値なので、そのまま置くとローソク足がポインタに触れる前に      |
+//| 切られる。スプレッドを足して、チャートの見た目と一致させる。      |
+//| スプレッドは実測が不要（Ask と Bid の差）で、時間帯による変動も  |
+//| そのまま追える。平均値を埋め込むと 0 時台だけ常に早く切られる。  |
+//|                                                                  |
+//| 最小距離まで押し戻したうえで、前回より緩い位置には置かない。     |
+//| 押し戻しは緩める方向なので、これが無いと価格が戻った場面で        |
+//| 損切りが後退する。                                               |
+//+------------------------------------------------------------------+
+void SarTrailUpdate(const int dir)
+{
+   double sar1;
+   if(!SarValue(sar1))
+      return;
+
+   if(!PositionSelectByTicket(g_posTicket))
+      return;
+
+   const double curSL = PositionGetDouble(POSITION_SL);
+   const double tp    = PositionGetDouble(POSITION_TP);
+
+   double want = sar1;
+   if(dir < 0)
+      want += SymbolInfoDouble(_Symbol, SYMBOL_ASK) - SymbolInfoDouble(_Symbol, SYMBOL_BID);
+
+   bool clamped = false;
+   want = NormalizeStopLevel(dir, want, clamped);
+
+   if(curSL > 0.0 && ((dir > 0 && want <= curSL) || (dir < 0 && want >= curSL)))
+   {
+      g_cntSarSkipped++;
+      return;
+   }
+
+   if(clamped)
+      g_cntSarClamped++;
+
+   if(g_trade.PositionModify(g_posTicket, want, tp))
+      g_cntSarModify++;
+   else
+      PrintFormat("EaSpanBollinger: 損切りを %.*f へ動かせませんでした (retcode=%u, %s)",
+                  _Digits, want, g_trade.ResultRetcode(), g_trade.ResultRetcodeDescription());
+}
+
+//+------------------------------------------------------------------+
+//| Bid がポインタに届いたら成行で決済する                           |
+//|                                                                  |
+//| サーバーの逆指値と違い、スプレッドが開いただけでは発動しない。   |
+//| そのかわり EA が動いていないと効かず、決済は Ask で約定する。     |
+//+------------------------------------------------------------------+
+void SarTickExit()
+{
+   if(InpR1_SarMode == SAR_MODE_OFF || InpR1_SarExec != SAR_EXEC_BID)
+      return;
+
+   ulong ticket = 0;
+   const int dir = CurrentPositionDir(ticket);
+   if(dir == 0)
+      return;
+
+   double sar1;
+   if(!SarValue(sar1))
+      return;
+
+   const double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   if((dir > 0 && bid > sar1) || (dir < 0 && bid < sar1))
+      return;
+
+   g_posTicket = ticket;
+   ClosePosition("SAR（Bid 判定）");
 }
 
 //+------------------------------------------------------------------+
@@ -617,6 +901,24 @@ void OpenMarket(const int dir, const double &close[])
          g_cntWidened++;
    }
 
+   // SAR をサーバーの逆指値で使うなら、建玉と同時に置く。次の足の更新まで
+   // 待つと最初の1本だけ無防備になり、Bid 判定と条件が揃わなくなる
+   if(InpR1_SarMode != SAR_MODE_OFF && InpR1_SarExec == SAR_EXEC_STOP)
+   {
+      double sar1;
+      if(SarValue(sar1))
+      {
+         double want = sar1;
+         if(dir < 0)
+            want += SymbolInfoDouble(_Symbol, SYMBOL_ASK) - SymbolInfoDouble(_Symbol, SYMBOL_BID);
+
+         bool clamped = false;
+         sl = NormalizeStopLevel(dir, want, clamped);
+         if(clamped)
+            g_cntSarClamped++;
+      }
+   }
+
    const string label = (dir > 0) ? "R1 買い" : "R1 売り";
    const bool   sent  = (dir > 0)
                         ? g_trade.Buy (InpLots, _Symbol, 0.0, sl, 0.0, label)
@@ -629,11 +931,54 @@ void OpenMarket(const int dir, const double &close[])
 
    g_barsHeld = 0;
 
+   // 建玉IDは約定履歴から引く。サーバー側で決済されたとき、決済価格を
+   // 取れる唯一の手がかりになる
+   g_posId = 0;
+   const ulong deal = g_trade.ResultDeal();
+   if(deal > 0 && HistoryDealSelect(deal))
+      g_posId = HistoryDealGetInteger(deal, DEAL_POSITION_ID);
+
    g_openRow.dir        = dir;
    g_openRow.openTime   = TimeCurrent();
    g_openRow.openPrice  = g_trade.ResultPrice();
    g_openRow.openSpread = (int)SymbolInfoInteger(_Symbol, SYMBOL_SPREAD);
    g_hasOpenRow         = true;
+}
+
+//+------------------------------------------------------------------+
+//| 建玉を閉じた約定を履歴から探し、価格と決済理由を返す             |
+//+------------------------------------------------------------------+
+bool ClosingDeal(const long posId, double &price, long &reason)
+{
+   if(posId == 0 || !HistorySelectByPosition(posId))
+      return false;
+
+   for(int i = HistoryDealsTotal() - 1; i >= 0; i--)
+   {
+      const ulong d = HistoryDealGetTicket(i);
+      if(d == 0)                                                continue;
+      if(HistoryDealGetInteger(d, DEAL_ENTRY) != DEAL_ENTRY_OUT) continue;
+
+      price  = HistoryDealGetDouble(d, DEAL_PRICE);
+      reason = HistoryDealGetInteger(d, DEAL_REASON);
+      return true;
+   }
+
+   return false;
+}
+
+//+------------------------------------------------------------------+
+//| 決済理由の名前。サーバー側の損切りは、SAR を使っているかで意味が |
+//| 変わるので呼び分ける（集計で SAR 決済だけを抜き出せるように）    |
+//+------------------------------------------------------------------+
+string DealReasonName(const long reason)
+{
+   if(reason == DEAL_REASON_SL)
+      return (InpR1_SarMode != SAR_MODE_OFF && InpR1_SarExec == SAR_EXEC_STOP)
+             ? "SAR（サーバー逆指値）" : "損切り";
+   if(reason == DEAL_REASON_TP) return "利確";
+   if(reason == DEAL_REASON_SO) return "証拠金不足による強制決済";
+   return "EA 以外の要因";
 }
 
 //+------------------------------------------------------------------+
