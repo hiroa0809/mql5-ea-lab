@@ -100,6 +100,7 @@ int            g_needBars    = 0;
 //    来た足で入る。期限は装填と同じ本数を使う（新しいつまみを増やさない）
 int            g_sarWaitDir  = 0;
 int            g_sarWaitAge  = 0;
+bool           g_sarWaitFiredNow = false;  // この足で待機から発火したか
 
 //--- 診断カウンタ。各条件は他の条件の成否と無関係に数える
 //    （docs/implementation_design.md §4）
@@ -120,8 +121,9 @@ int g_cntSarModify    = 0;   // 損切りを書き換えた回数
 int g_cntSarClamped   = 0;   // 最小距離まで押し戻した回数
 int g_cntSarSkipped   = 0;   // 前回より緩くなるため書き換えなかった回数
 int g_cntSarBlocked   = 0;   // ポインタが逆側で発火を見送った回数
-int g_cntSarWaitFired = 0;   // 待機後、ポインタが反転して入れた回数
+int g_cntSarWaitFired = 0;   // 待機後、ポインタが反転して実際に発注した回数
 int g_cntSarWaitExp   = 0;   // 待機のまま期限切れになった回数
+int g_cntSarNoValue   = 0;   // ポインタを取れず損切りを置けなかった回数
 
 //--- 1取引ぶんの記録。グロス損益はスプレッドを足し戻して求めるので、
 //    建玉時と決済時のスプレッドを両方持つ（値の解釈は集計側で行う）
@@ -233,6 +235,24 @@ int OnInit()
          return INIT_PARAMETERS_INCORRECT;
       }
 
+      // 装填の本数はエントリーゲートの待機期限にも使う。段階エントリーが
+      // 無効だと下の検証が効かず、0 以下でも起動する。そのとき見送った
+      // 発火は次の足で必ず期限切れになり、無言で取引が減る
+      if(InpR1_SarEntryGate && InpR1_ArmBars < 1)
+      {
+         Print("装填が生きている本数は 1 以上にしてください（ポインタの反転を待つ期限に使います）");
+         return INIT_PARAMETERS_INCORRECT;
+      }
+
+      // どちらも建玉の同じ損切り価格を書くため、後から置いたほうが黙って
+      // もう一方を消す。CSV には両方の設定が残るので、結果から条件を
+      // 再現できなくなる。混ぜた挙動を新たに定義せず、起動時に弾く
+      if(InpR1_UseSL && InpR1_SarMode != SAR_MODE_OFF && InpR1_SarExec == SAR_EXEC_STOP)
+      {
+         Print("σ の損切りと SAR の逆指値は同時に使えません。どちらか片方にしてください");
+         return INIT_PARAMETERS_INCORRECT;
+      }
+
       g_sarHandle = iSAR(_Symbol, _Period, InpR1_SarStep, InpR1_SarMax);
       if(g_sarHandle == INVALID_HANDLE)
       {
@@ -333,6 +353,7 @@ void OnDeinit(const int reason)
                   g_cntSarModify, g_cntSarClamped, g_cntSarSkipped);
       PrintFormat("[SAR] ポインタが逆側で見送った %d → 反転して入れた %d / 期限切れ %d",
                   g_cntSarBlocked, g_cntSarWaitFired, g_cntSarWaitExp);
+      PrintFormat("[SAR] ポインタを取れず損切りを置けなかった %d", g_cntSarNoValue);
    }
 }
 
@@ -476,6 +497,9 @@ void OnTick()
    if(dir != 0)
       return;
 
+   if(g_sarWaitFiredNow)
+      g_cntSarWaitFired++;
+
    if(entryBuy)  OpenMarket(+1, close);
    if(entrySell) OpenMarket(-1, close);
 }
@@ -612,6 +636,7 @@ void WriteCsv()
    FileWrite(fs, "sar_blocked",   g_cntSarBlocked);
    FileWrite(fs, "sar_wait_fired", g_cntSarWaitFired);
    FileWrite(fs, "sar_wait_expired", g_cntSarWaitExp);
+   FileWrite(fs, "sar_no_value", g_cntSarNoValue);
    FileWrite(fs, "trades",        rows);
    FileClose(fs);
 
@@ -675,6 +700,42 @@ bool SarValue(double &value)
 }
 
 //+------------------------------------------------------------------+
+//| SAR から損切り価格を求める                                       |
+//|                                                                  |
+//| 建玉時と毎足の更新で必ずここを通す。同じ手順を2箇所に書くと、    |
+//| 片方だけ直したときに建玉時と更新時で損切り水準がずれる。         |
+//|                                                                  |
+//| 売り建玉の逆指値は Ask で発動する。ポインタは Bid のチャートから |
+//| 出た値なので、そのまま置くとローソク足がポインタに触れる前に      |
+//| 切られる。スプレッドを足して、チャートの見た目と一致させる。      |
+//| スプレッドは実測が不要（Ask と Bid の差）で、時間帯による変動も  |
+//| そのまま追える。平均値を埋め込むと 0 時台だけ常に早く切られる。  |
+//+------------------------------------------------------------------+
+bool SarStopPrice(const int dir, double &price)
+{
+   double sar1;
+   if(!SarValue(sar1))
+   {
+      // 無言で戻ると、損切りを持たない建玉ができたことが記録に残らない
+      g_cntSarNoValue++;
+      PrintFormat("EaSpanBollinger: ポインタを取れず損切りを置けませんでした（通算 %d 回）",
+                  g_cntSarNoValue);
+      return false;
+   }
+
+   double want = sar1;
+   if(dir < 0)
+      want += SymbolInfoDouble(_Symbol, SYMBOL_ASK) - SymbolInfoDouble(_Symbol, SYMBOL_BID);
+
+   bool clamped = false;
+   price = NormalizeStopLevel(dir, want, clamped);
+   if(clamped)
+      g_cntSarClamped++;
+
+   return true;
+}
+
+//+------------------------------------------------------------------+
 //| ポインタが正しい側に無ければ入らない                             |
 //|                                                                  |
 //| 買いならポインタは終値より下、売りなら上にあるのが正常。逆側だと |
@@ -684,6 +745,8 @@ bool SarValue(double &value)
 //+------------------------------------------------------------------+
 void SarEntryGate(const double close1, bool &entryBuy, bool &entrySell)
 {
+   g_sarWaitFiredNow = false;
+
    double sar1;
    if(!SarValue(sar1))
       return;
@@ -699,9 +762,11 @@ void SarEntryGate(const double close1, bool &entryBuy, bool &entrySell)
 
       if((g_sarWaitDir > 0 && okBuy) || (g_sarWaitDir < 0 && okSell))
       {
+         // 実際に発注できたかはここでは分からない（建玉保有中なら発注前に
+         // 抜ける）。頻度の実測が目的なので、計上は発注の直前で行う
          if(g_sarWaitDir > 0) entryBuy = true; else entrySell = true;
-         g_cntSarWaitFired++;
-         g_sarWaitDir = 0;
+         g_sarWaitFiredNow = true;
+         g_sarWaitDir      = 0;
       }
       else if(g_sarWaitAge >= InpR1_ArmBars)
       {
@@ -742,31 +807,21 @@ void SarEntryGate(const double close1, bool &entryBuy, bool &entrySell)
 //+------------------------------------------------------------------+
 void SarTrailUpdate(const int dir)
 {
-   double sar1;
-   if(!SarValue(sar1))
-      return;
-
    if(!PositionSelectByTicket(g_posTicket))
       return;
 
    const double curSL = PositionGetDouble(POSITION_SL);
    const double tp    = PositionGetDouble(POSITION_TP);
 
-   double want = sar1;
-   if(dir < 0)
-      want += SymbolInfoDouble(_Symbol, SYMBOL_ASK) - SymbolInfoDouble(_Symbol, SYMBOL_BID);
-
-   bool clamped = false;
-   want = NormalizeStopLevel(dir, want, clamped);
+   double want;
+   if(!SarStopPrice(dir, want))
+      return;
 
    if(curSL > 0.0 && ((dir > 0 && want <= curSL) || (dir < 0 && want >= curSL)))
    {
       g_cntSarSkipped++;
       return;
    }
-
-   if(clamped)
-      g_cntSarClamped++;
 
    if(g_trade.PositionModify(g_posTicket, want, tp))
       g_cntSarModify++;
@@ -905,18 +960,9 @@ void OpenMarket(const int dir, const double &close[])
    // 待つと最初の1本だけ無防備になり、Bid 判定と条件が揃わなくなる
    if(InpR1_SarMode != SAR_MODE_OFF && InpR1_SarExec == SAR_EXEC_STOP)
    {
-      double sar1;
-      if(SarValue(sar1))
-      {
-         double want = sar1;
-         if(dir < 0)
-            want += SymbolInfoDouble(_Symbol, SYMBOL_ASK) - SymbolInfoDouble(_Symbol, SYMBOL_BID);
-
-         bool clamped = false;
-         sl = NormalizeStopLevel(dir, want, clamped);
-         if(clamped)
-            g_cntSarClamped++;
-      }
+      double sarSL;
+      if(SarStopPrice(dir, sarSL))
+         sl = sarSL;
    }
 
    const string label = (dir > 0) ? "R1 買い" : "R1 売り";
