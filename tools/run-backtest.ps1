@@ -26,13 +26,11 @@ param(
     [Parameter(Mandatory)][string]$To,            # 2022.12.31
     [string]$Symbol   = 'USDJPY#',
     [string]$Period   = 'M5',
-    [int]$Exit        = 0,                        # 決済の方式 0=A 1=B 2=C
+    [int]$ExitMode    = 0,                        # 決済の方式 0=遅行スパンの陰転 1=SAR 2=併用
     [int]$Period_     = 21,                       # 期間（センターラインとσ）
     [int]$LagBars     = 21,                       # 遅行線の本数
-    [int]$UseSqueeze  = 1,                        # ①膠着を条件に入れる
     [int]$SqueezeBars = 21,                       # ①膠着とみなす本数
     [double]$SigmaMult = 3.0,                     # ①③で使うσの倍数
-    [int]$UseExpand   = 1,                        # ④バンド幅の拡大を条件に入れる
     [int]$ExpandBars  = 3,                        # ④拡大を見る本数
     [int]$UseSL       = 0,                        # 損切りを使う
     [double]$SLSigma  = 2.0,                      # 損切り（σの何倍）
@@ -42,10 +40,16 @@ param(
     [double]$Lots     = 0.10,                     # ロット
     [int]$StagedMode  = 0,                        # 段階エントリー 0=使わない 1=装填1のみ 2=装填1+装填2
     [int]$ArmBars     = 42,                       # 装填が生きている本数
-    [int]$RsiPeriod   = 14,                       # RSI の期間
-    [double]$RsiUpper = 80,                       # 買いの発火を見送る RSI
-    [double]$RsiLower = 20,                       # 売りの発火を見送る RSI
-    [int]$Model       = 2,                        # 2=始値のみ（本 EA は足の始値でしか売買しないため過不足なし）
+    [int]$SarExec     = 0,                        # SAR の執行方式 0=サーバーの逆指値 1=Bid判定
+    [double]$SarStep  = 0.01,                     # SAR のステップ
+    [double]$SarMax   = 0.20,                     # SAR の最大
+    [int]$SarEntryGate = 0,                       # ポインタが正しい側になるまで入らない
+    # 2=始値のみ。SAR を使わない設定では、本 EA は足の始値でしか売買しない
+    # ため過不足ない。**SAR を使うときは 4（実際のティックに基づく全ティック）
+    # にすること。** 2 では OnTick が足に1回しか来ないため Bid 判定が
+    # 「足の始値で1回」に退化し、スプレッド拡大も再現されない。この2点は
+    # まさに執行方式の比較で見たい対象そのもの
+    [int]$Model       = 2,
     [int]$TimeoutMin  = 120,
     [int]$WaitFreeSec = 90,                       # 同じ端末が空くまで待つ秒数
     [string]$Terminal = 'C:\Program Files\XM Trading MT5\terminal64.exe'
@@ -101,26 +105,25 @@ InpLots=$Lots
 InpReverseOnOpposite=$Reverse
 InpR1_Period=$Period_
 InpR1_LagBars=$LagBars
-InpR1_UseSqueeze=$UseSqueeze
 InpR1_SqueezeBars=$SqueezeBars
 InpR1_SigmaMult=$SigmaMult
-InpR1_UseExpand=$UseExpand
 InpR1_ExpandBars=$ExpandBars
-InpR1_Exit=$Exit
+InpR1_ExitMode=$ExitMode
 InpR1_UseSL=$UseSL
 InpR1_SLSigma=$SLSigma
 InpR1_UseTimeStop=$UseTimeStop
 InpR1_HoldBars=$HoldBars
 InpR1_StagedMode=$StagedMode
 InpR1_ArmBars=$ArmBars
-InpR1_RsiPeriod=$RsiPeriod
-InpR1_RsiUpper=$RsiUpper
-InpR1_RsiLower=$RsiLower
+InpR1_SarExec=$SarExec
+InpR1_SarStep=$SarStep
+InpR1_SarMax=$SarMax
+InpR1_SarEntryGate=$SarEntryGate
 InpRunTag=$Tag
 "@ | Set-Content -Path $ini -Encoding ASCII
 
 Write-Host "設定: $ini"
-Write-Host "実行: $Symbol $Period  $From 〜 $To  決済方式=$Exit  段階=$StagedMode  RSI=$RsiUpper/$RsiLower  識別名=$Tag"
+Write-Host "実行: $Symbol $Period  $From 〜 $To  決済方式=$ExitMode  段階=$StagedMode  SAR執行=$SarExec/ゲート$SarEntryGate  ティック=$Model  識別名=$Tag"
 
 $beforeTrades  = @(Get-ChildItem $common -Filter "r1_${Tag}_trades*.csv"  -ErrorAction SilentlyContinue).Count
 $beforeSummary = @(Get-ChildItem $common -Filter "r1_${Tag}_summary*.csv" -ErrorAction SilentlyContinue).Count
