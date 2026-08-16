@@ -143,4 +143,185 @@ int SM_RequiredBars(const int tenkanPeriod,
    return MathMax(tenkanPeriod, MathMax(kijunPeriod, spanBPeriod)) + lagBars + slopeBars + 2;
 }
 
+//+------------------------------------------------------------------+
+//| ②遅行スパンの陽転／陰転                                          |
+//|                                                                  |
+//| 定義は docs/trading_rules.md §3.1。遅行線の右端（= 判定足の終値） |
+//| を、その1本手前から lagBars 本ぶんの足と比べる。                  |
+//|                                                                  |
+//| **判定足そのものは含めない。** 自分の高値は終値より必ず上なので、 |
+//| 含めると陽転が絶対に成立しない。                                 |
+//|                                                                  |
+//| 比較先を「lagBars 本前の1本だけ」にしない。R1 の③に対して単独    |
+//| 成立率 86.5%・重複 100% になり条件として働かなかった             |
+//| （2026-08-09・人工データ30万本）。直近 lagBars 本の高安と比べる。 |
+//|                                                                  |
+//| 陽転でも陰転でもない状態（= 資料の「絡む」）は above / below が   |
+//| どちらも false で表される。                                      |
+//+------------------------------------------------------------------+
+bool SM_LagState(const double &high[],
+                 const double &low[],
+                 const double &close[],
+                 const int shift,
+                 const int lagBars,
+                 bool &above,
+                 bool &below)
+{
+   if(shift < 0 || lagBars < 1) return false;
+
+   const int need = shift + 1 + lagBars;
+   if(ArraySize(high) < need || ArraySize(low) < need) return false;
+   if(ArraySize(close) <= shift)                       return false;
+
+   above = (close[shift] > SM_HighestHigh(high, shift + 1, lagBars));
+   below = (close[shift] < SM_LowestLow(low,   shift + 1, lagBars));
+   return true;
+}
+
+//+------------------------------------------------------------------+
+//| ④赤いスパンの傾き                                                |
+//|                                                                  |
+//| 定義は docs/trading_rules.md §3.4。slopeBars 本前の赤スパンと     |
+//| 比べ、**平らな足も通す**（「以上」「以下」で判定する）。          |
+//|                                                                  |
+//| 赤スパンは 52 本の高値・安値の中値なので**階段状**になる。52本の  |
+//| 最高値か最安値が入れ替わるまで完全に平らで、レンジ相場では何十本  |
+//| も動かない。厳密な `>` にすると、雲が転換した足の 43.3% は赤      |
+//| スパンが 5 本前と同値で、④を通るのが 16.2% にとどまった（②28.8%|
+//| ・③85.3% に対し突出して絞る・人工データ30万本）。資料は「傾きで  |
+//| 判断」としか言っておらず、平らな足を落とす根拠が無い。            |
+//|                                                                  |
+//| **平らな足では up と down が同時に true になる。** ④単独では買い |
+//| と売りのどちらも通すが、向きを決めるのは①雲の転換なので、両方向 |
+//| のサインが同時に出ることはない。                                 |
+//|                                                                  |
+//| 厳密な傾きへ切り替える入力は持たない。④そのものを使うかどうかが |
+//| 選べれば足りる（SMRule2Params の useSlope）。                     |
+//|                                                                  |
+//| 既定の 5 本に資料の根拠は無い（資料は「傾きで判断」としか書いて   |
+//| いない）。階段1段の間隔より短い可能性がある。                     |
+//+------------------------------------------------------------------+
+bool SM_SpanBSlope(const double &high[],
+                   const double &low[],
+                   const int shift,
+                   const int spanBPeriod,
+                   const int slopeBars,
+                   bool &up,
+                   bool &down)
+{
+   if(shift < 0 || spanBPeriod < 1 || slopeBars < 1) return false;
+
+   const int need = shift + slopeBars + spanBPeriod;
+   if(ArraySize(high) < need || ArraySize(low) < need) return false;
+
+   const double now  = SM_Midpoint(high, low, shift,             spanBPeriod);
+   const double past = SM_Midpoint(high, low, shift + slopeBars, spanBPeriod);
+
+   up   = (now >= past);
+   down = (now <= past);
+   return true;
+}
+
+//+------------------------------------------------------------------+
+//| ルール2の入力                                                    |
+//+------------------------------------------------------------------+
+struct SMRule2Params
+{
+   int  tenkanPeriod;   // 転換線の期間
+   int  kijunPeriod;    // 基準線の期間
+   int  spanBPeriod;    // 赤スパンの期間
+   int  lagBars;        // 遅行線の本数
+   bool useLag;         // ②を条件に入れる
+   bool useClosePos;    // ③を条件に入れる
+   bool useSlope;       // ④を条件に入れる
+   int  slopeBars;      // ④傾きを見る本数
+};
+
+//+------------------------------------------------------------------+
+//| 1本ぶんの判定結果                                                |
+//|                                                                  |
+//| ②③④は使う／使わないに関わらず常に埋める。外した条件が実際には |
+//| どうだったかをインジケーターのデータウィンドウで読めるようにする |
+//| ため（矢印が出ない足でもどこで止まったか分かる）。買い／売りに   |
+//| 反映されるのは使うと指定した条件だけ。                           |
+//+------------------------------------------------------------------+
+struct SMRule2Signal
+{
+   bool flipBlue;     // ①雲が青へ転換した（買いの引き金）
+   bool flipRed;      // ①雲が赤へ転換した（売りの引き金）
+   bool lagAbove;     // ②遅行スパンが陽転
+   bool lagBelow;     // ②遅行スパンが陰転
+   bool closeAbove;   // ③終値が青スパンより上
+   bool closeBelow;   // ③終値が青スパンより下
+   bool spanBUp;      // ④赤スパンが上向き
+   bool spanBDown;    // ④赤スパンが下向き
+   bool buy;          // 使う条件がすべて揃った（買い）
+   bool sell;         // 同（売り）
+};
+
+//+------------------------------------------------------------------+
+//| ルール2 — 雲転換の順張りを判定する                               |
+//|                                                                  |
+//| 条件の定義は docs/trading_rules.md §3.1/§3.4/§3.5（用語の一意化）|
+//| と §5.2（エントリー）。資料の条件番号 ①②③④ をそのまま持つ。  |
+//|                                                                  |
+//| ①雲の色の転換だけが**遷移**で、残る②③④は判定足の**状態**。   |
+//| 遷移する条件を2つ以上持つと同じ足で揃うことがほぼ無く取引がゼロ  |
+//| になる（ルール1で経験済み・tasks/TASK_MASTER.md N5-1）。          |
+//|                                                                  |
+//| レンジ相場での逆張り（資料 p3「レンジ相場では逆指標」）は入れて  |
+//| いない。レンジ判定はスーパーボリンジャーの仕事で、入れると        |
+//| スパンモデル単体でなくなるため（docs/trading_rules.md §5.1）。    |
+//|                                                                  |
+//| 高値・安値・終値の配列は時系列順（添字 0 = 最新足）が前提。呼ぶ  |
+//| 側が ArraySetAsSeries を済ませること。                           |
+//|                                                                  |
+//| 戻り値 false は「判定できない」。履歴が足りない場合などで、この  |
+//| とき out の中身は不定。**戻り値を確認せずに out を読まないこと。**|
+//+------------------------------------------------------------------+
+bool SM_Rule2(const double &high[],
+              const double &low[],
+              const double &close[],
+              const int shift,
+              const SMRule2Params &p,
+              SMRule2Signal &out)
+{
+   if(shift < 0) return false;
+
+   // ① 雲の色の転換（引き金）— 判定足と1本前の色を比べる。青にも赤にも
+   // ならない足（青スパンと赤スパンが同値）は「どちらでもない」で、転換の
+   // 起点にはなるが転換先にはならない。docs/trading_rules.md §3.5
+   SMValues now, prev;
+   if(!SM_Calc(high, low, shift,     p.tenkanPeriod, p.kijunPeriod, p.spanBPeriod, now))  return false;
+   if(!SM_Calc(high, low, shift + 1, p.tenkanPeriod, p.kijunPeriod, p.spanBPeriod, prev)) return false;
+
+   out.flipBlue = (now.spanA > now.spanB) && !(prev.spanA > prev.spanB);
+   out.flipRed  = (now.spanB > now.spanA) && !(prev.spanB > prev.spanA);
+
+   // ② 遅行スパンの陽転／陰転
+   if(!SM_LagState(high, low, close, shift, p.lagBars, out.lagAbove, out.lagBelow))
+      return false;
+
+   // ③ ローソク足と青スパンの位置関係（資料 p5-3）
+   out.closeAbove = (close[shift] > now.spanA);
+   out.closeBelow = (close[shift] < now.spanA);
+
+   // ④ 赤スパンの傾き（資料 p5-1）
+   if(!SM_SpanBSlope(high, low, shift, p.spanBPeriod, p.slopeBars,
+                     out.spanBUp, out.spanBDown))
+      return false;
+
+   out.buy = out.flipBlue
+             && (!p.useLag      || out.lagAbove)
+             && (!p.useClosePos || out.closeAbove)
+             && (!p.useSlope    || out.spanBUp);
+
+   out.sell = out.flipRed
+              && (!p.useLag      || out.lagBelow)
+              && (!p.useClosePos || out.closeBelow)
+              && (!p.useSlope    || out.spanBDown);
+
+   return true;
+}
+
 #endif // SPANMODEL_MQH
