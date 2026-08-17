@@ -63,11 +63,13 @@
 // かを見るため）。矢印に反映されるのは「条件に入れる」と指定したものだけ。
 #property indicator_label7  "①雲の転換 (1=青へ -1=赤へ)"
 #property indicator_type7   DRAW_NONE
-#property indicator_label8  "②a 遅行スパンと26本前の終値 (1=上 -1=下)"
+// ②の3行の見出しは OnInit で本数を埋めて上書きする。ここに書く本数は
+// 既定値でしかなく、遅行線の本数を変えた瞬間に嘘になる。
+#property indicator_label8  "②a 遅行スパンと重なる足の終値"
 #property indicator_type8   DRAW_NONE
-#property indicator_label9  "②b 遅行スパンと26本前の高値安値 (1=上抜け -1=下抜け)"
+#property indicator_label9  "②b 遅行スパンと重なる足の高値安値"
 #property indicator_type9   DRAW_NONE
-#property indicator_label10 "②c 遅行スパンと26本前の雲 (1=上抜け -1=下抜け 0=雲の中)"
+#property indicator_label10 "②c 遅行スパンと重なる足の雲"
 #property indicator_type10  DRAW_NONE
 #property indicator_label11 "③終値と青スパン (1=上 -1=下)"
 #property indicator_type11  DRAW_NONE
@@ -80,9 +82,11 @@ input int  InpTenkan       = 9;      // 転換線の期間
 input int  InpKijun        = 26;     // 基準線の期間
 input int  InpSpanB        = 52;     // 赤スパンの期間
 input int  InpLagBars      = 26;     // 遅行線の本数
-input bool InpUseLagClose  = false;  // ②a 遅行スパンが26本前の終値を超える
-input bool InpUseLagHighLow= true;   // ②b 遅行スパンが26本前の高値安値を超える
-input bool InpUseLagCloud  = false;  // ②c 遅行スパンが26本前の雲を抜ける
+// 設定項目の表示名は起動時に書き換えられないため、本数を書かない。
+// 「重なる足」＝遅行スパンの右端が乗っている足（遅行線の本数ぶん前）。
+input bool InpUseLagClose  = false;  // ②a 遅行スパンが重なる足の終値を抜けている
+input bool InpUseLagHighLow= true;   // ②b 遅行スパンが重なる足の高値安値を抜けている
+input bool InpUseLagCloud  = false;  // ②c 遅行スパンが重なる足の雲を抜けている
 input bool InpUseClosePos  = true;   // ③終値と青スパンの位置関係を条件に入れる
 input bool InpUseSlope     = true;   // ④長期スパンの傾きを条件に入れる
 input int  InpSlopeBars    = 5;      // ④傾きを見る本数
@@ -146,6 +150,16 @@ int OnInit()
 
    for(int p = 0; p < 12; p++)
       PlotIndexSetDouble(p, PLOT_EMPTY_VALUE, EMPTY_VALUE);
+
+   // ②の見出しに実際の本数を埋める。#property の文言は固定なので、遅行線の
+   // 本数を既定から変えると表示だけ嘘になる（設定の食い違いを色の問題と
+   // 誤診した前例がある・docs/lessons_learned.md）。
+   PlotIndexSetString(7, PLOT_LABEL,
+      StringFormat("②a 遅行スパンと%d本前の終値 (1=上 -1=下)", InpLagBars));
+   PlotIndexSetString(8, PLOT_LABEL,
+      StringFormat("②b 遅行スパンと%d本前の高値安値 (1=上抜け -1=下抜け)", InpLagBars));
+   PlotIndexSetString(9, PLOT_LABEL,
+      StringFormat("②c 遅行スパンと%d本前の雲 (1=上抜け -1=下抜け 0=雲の中)", InpLagBars));
 
    // 印は足の外側へ逃がす。安値・高値そのものに描くとローソク足に重なって
    // 位置が読めない（負のシフトが上、正が下・単位はピクセル）。
