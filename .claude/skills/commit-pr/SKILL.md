@@ -1,7 +1,7 @@
 ---
 name: commit-pr
 description: >
-  作業をコミットして PR を作成し、CodeRabbit の自動レビューを起動する。
+  作業をコミットして PR を作成する（CodeRabbit のレビューは手動起動が必要）。
   「コミットしてPR」「PR作成して」「PR出して」「コードラビットにレビュー」「レビュー依頼」「レビューしてもらう」で発火。/commit-pr でも起動。
   main 直コミットを避け feature ブランチ → コンパイル検証 → push → PR(base main) までを一括で行う。マージはしない（レビュー反映後に別途）。
 ---
@@ -113,11 +113,17 @@ rtk gh pr create --repo hiroa0809/mql5-ea-lab --base main --head <branch> --titl
 
 作成後、**PR の URL をユーザーに提示**する。
 
-## Step 7: CodeRabbit レビュー（自動・以降は /coderabbit-review へ）
+## Step 7: CodeRabbit レビュー（手動起動が必要・以降は /coderabbit-review へ）
 
-PR 作成で CodeRabbit が自動レビューを開始する。
+**PR を作っただけではレビューは走らない**（2026-08-16 に判明）。CodeRabbit はスター10個未満のリポジトリで自動レビューを止めるようになり、チェックは `SUCCESS` / `Review skipped: manual review required for this OSS repository` のまま止まる。**状態が `SUCCESS` なので、説明文を読まないと「合格」と誤読する。**
 
-- 本スキルの責務は**ここまで**。レビューの取得・トリアージ・反映・返信は `/coderabbit-review` スキルが担当する。
+起動はコメント1つ。制限は**1時間あたり1回**。
+
+```
+rtk gh pr comment <PR#> --repo hiroa0809/mql5-ea-lab --body "@coderabbitai review"
+```
+
+- 本スキルの責務は**ここまで**。起動後の完了判定・取得・トリアージ・反映・返信は `/coderabbit-review` スキルが担当する（起動コマンド自体も同スキルの Step 0.4 にある。続けて実行するなら本スキルでは投稿せず、そのまま `/coderabbit-review` へ渡してよい）。
 - そのまま続けてよいかユーザーに確認し、了承があれば `/coderabbit-review` へ進む。
 - マージは明示指示があるまで行わない。
 

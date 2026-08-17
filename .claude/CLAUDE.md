@@ -14,13 +14,20 @@
 - 指摘・要約とも日本語で返る。
 - 誤検知も出る（PR #1 では1件）。ただし MQL5 仕様の誤解ではなく、変数の初期値を見落とした状態追跡ミスだった。**実コード照合のトリアージは必須**。
 
-### レビュー回数の制限（無料プラン）
+### 自動レビューは走らない（2026-08-16 PR #15 で判明・仕様変更）
 
-無料プランには一定時間あたりのレビュー回数上限がある。上限に達すると `Review limit reached` が返り、次のレビューまで待たされる（PR #1 では約25分待ちが発生）。
+**PR を作っても、push しても、CodeRabbit は自動でレビューしない。** スター10個未満のリポジトリは手動起動が必要という方針に変わった（本リポジトリは 0 個・公開設定）。
+
+- チェックは `SUCCESS` / **`Review skipped: manual review required for this OSS repository`** のまま止まる。**`state` が `SUCCESS` なので、`description` を読まないと「合格」と誤読する。**
+- 起動は `rtk gh pr comment <PR#> --repo hiroa0809/mql5-ea-lab --body "@coderabbitai review"`。
+- スターを10個集める方向は追わない。手動起動はコマンド1つで済む。
+
+### レビュー回数の制限
+
+**1時間あたり1回**（ウォークスルーに `Your plan includes up to 1 review per rolling hour; N remain` と出る）。
 
 - **短時間に何度も push して再レビューを走らせない**。複数の指摘は**まとめて1回の push** で対応する。
-- 制限中に再レビューしたい場合は、時間を置いてから PR に `@coderabbitai review` とコメントする（新規 push でも起動する）。
-- 従量課金（$0.25/ファイル）を有効にすれば即時レビューできるが、通常は待てばよい。
+- 上限に達した場合は時間を置いてから `@coderabbitai review` を投稿する。
 
 #### `@coderabbitai review` が効く条件（2026-07-31 PR #4 で確定）
 

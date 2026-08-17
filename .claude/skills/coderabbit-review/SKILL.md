@@ -33,6 +33,18 @@ rtk gh pr view --json number,title,headRefName   # 現在ブランチのPR
 # 出てこなければ: rtk gh pr list --state open
 ```
 
+## Step 0.4: レビューの手動起動（毎回必須・2026-08-16 に判明）
+
+**PR を作っても自動レビューは走らない。** CodeRabbit は**スター10個未満のリポジトリで自動レビューを止める**方針に変わった（本リポジトリは 0 個）。チェックは `SUCCESS` / `Review skipped: manual review required for this OSS repository` のまま止まり、放置すると**1行もレビューされていないのに「合格」に見える**。
+
+```
+rtk gh pr comment <PR#> --repo hiroa0809/mql5-ea-lab --body "@coderabbitai review"
+```
+
+- 起動したら Step 0.5 のポーリングで完了を待つ。
+- **制限は1時間あたり1回**（ウォークスルーに `Your plan includes up to 1 review per rolling hour` と出る）。修正の再レビューは**まとめて1回の push** にする。
+- スターを10個集める方向は追わない（公開リポジトリだが、レビュー起動のためだけに他人を動かす話になる）。手動起動はコマンド1つで済む。
+
 ## Step 0.5: レビュー完了の確定判定（必須・推測禁止）
 
 「数分待って眺める」をしない。CodeRabbit は PR に **commit status チェック**を出すので、その状態で完了を機械判定する:
@@ -45,6 +57,7 @@ CodeRabbit 行の読み方:
 
 | state / description | 意味 | 行動 |
 |---|---|---|
+| `SUCCESS` / **"Review skipped: manual review required..."** | **自動レビューが走っていない**（スター10個未満のため） | Step 0.4 で手動起動する。**Step 1 へ進んではいけない** |
 | `PENDING` / "Review in progress" | レビュー中（まだ書いている） | **自動ポーリングで完了を待つ**（下記「PENDING 時の自動待機」）。完了後に Step 1 へ |
 | `SUCCESS` / **"Review completed"** | レビュー**完了** | Step 1 へ進む |
 | `SUCCESS` / **"Review rate limited"** | **レビューは走っていない**（レート制限） | 待って `@coderabbitai review` で手動起動。**Step 1 へ進んではいけない** |
@@ -67,6 +80,7 @@ while true; do
   echo "CodeRabbit: ${d:-（未生成）}"
   case "$d" in *"Review completed"*|FAILURE*) exit 0;; esac
   case "$d" in *"rate limited"*) echo "レート制限。待って @coderabbitai review で手動起動する"; exit 2;; esac
+  case "$d" in *"skipped"*) echo "自動レビューが走っていない。Step 0.4 で手動起動する"; exit 3;; esac
   sleep 150
 done
 ```
@@ -74,6 +88,7 @@ done
 - ポーリング間隔は 120〜180 秒（CodeRabbit のレビューは通常数分で終わる）。
 - push 直後でチェックがまだ生成されていない（CodeRabbit 行が空）場合も、ループ内で `d` が空のまま回り続けるので、行が現れた時点で判定される。
 - **終了コード 2 はレート制限**。この場合レビューは走っていないので Step 1 へ進まない。制限コメントの `Next review available in: N minutes` ぶん待ってから `@coderabbitai review` を投稿し、再度このループを回す。
+- **終了コード 3 は自動レビュー未起動**（スキップ）。Step 0.4 の手動起動を先に行う。
 - 完了通知で再開したら Step 1（指摘取得）へ。`Review completed` で新規指摘が無ければ「合格・新規指摘なし」で確定。
 - 万一ハングしてもユーザーはいつでも割り込める。
 
