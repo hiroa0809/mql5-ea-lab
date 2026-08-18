@@ -106,7 +106,7 @@ int OnInit()
                SQZ_MethodLabel(InpMethod), SQZ_DefaultThreshold(InpMethod), InpThreshold);
 
    if(InpMethod == SQZ_RANGE_RANK)
-      Print("⑤は順位を見る本数を 7 にすると、Crabel の NR7（直近7本で最小の値幅）そのものになります");
+      Print("⑤は順位を見る本数を 6 にすると、Crabel の NR7（その足を含む7本で最小の値幅）そのものになります。順位は判定する足を母集団から外して数えるので、7本ぶんを見るには 6 を指定します");
 
    if(InpMethod == SQZ_BW_RANK_HOUR && g_tf == PERIOD_D1)
       Print("日足はどの足も同じ時刻なので、②は①と同じ結果になります");
