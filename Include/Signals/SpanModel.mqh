@@ -144,37 +144,64 @@ int SM_RequiredBars(const int tenkanPeriod,
 }
 
 //+------------------------------------------------------------------+
-//| ②遅行スパンの陽転／陰転                                          |
+//| ②遅行スパンの位置 — 3通りの比べ方                                |
 //|                                                                  |
-//| 定義は docs/trading_rules.md §3.1。遅行線の右端（= 判定足の終値） |
-//| を、その1本手前から lagBars 本ぶんの足と比べる。                  |
+//| 遅行線の右端は判定足の終値で、それを lagBars 本前の位置に置く。   |
+//| **比較先はその1本（添字 shift + lagBars）に固定**。遅行スパンの   |
+//| 定義そのものなので切り替えを持たない（2026-08-17 決定）。         |
 //|                                                                  |
-//| **判定足そのものは含めない。** 自分の高値は終値より必ず上なので、 |
-//| 含めると陽転が絶対に成立しない。                                 |
+//| 資料が言っているのは「遅行スパンがローソク足を上抜け = 買い」     |
+//| （S1）だけで、足の**どこ**と比べるかは書いていない。そこで3通り   |
+//| を用意し、使う組み合わせを入力で選ぶ（docs/trading_rules.md §3.1）|
 //|                                                                  |
-//| 比較先を「lagBars 本前の1本だけ」にしない。R1 の③に対して単独    |
-//| 成立率 86.5%・重複 100% になり条件として働かなかった             |
-//| （2026-08-09・人工データ30万本）。直近 lagBars 本の高安と比べる。 |
+//|   a 終値 … 比較先の足の終値と比べる（最も緩い）                  |
+//|   b 高安 … 比較先の足の高値（買い）・安値（売り）と比べる        |
+//|   c 雲   … 比較先の位置の雲を完全に抜けているか。買いなら雲の    |
+//|            上端（青スパンと赤スパンの高いほう）より上            |
 //|                                                                  |
-//| 陽転でも陰転でもない状態（= 資料の「絡む」）は above / below が   |
-//| どちらも false で表される。                                      |
+//| c を「雲の上端」にしたのは、資料が「ローソク足が雲の中 = 勢いが   |
+//| 弱まっている」と述べており、**雲の中を「抜けた」とは呼んでいない**|
+//| ため（2026-08-17 決定）。                                        |
+//|                                                                  |
+//| 上でも下でもない状態（= 資料の「絡む」）は、その組の above /     |
+//| below がどちらも false で表される。                              |
 //+------------------------------------------------------------------+
+struct SMLagState
+{
+   bool closeAbove, closeBelow;   // a 比較先の終値と比べた
+   bool highAbove,  lowBelow;     // b 比較先の高値・安値と比べた
+   bool cloudAbove, cloudBelow;   // c 比較先の雲と比べた
+};
+
 bool SM_LagState(const double &high[],
                  const double &low[],
                  const double &close[],
                  const int shift,
                  const int lagBars,
-                 bool &above,
-                 bool &below)
+                 const int tenkanPeriod,
+                 const int kijunPeriod,
+                 const int spanBPeriod,
+                 SMLagState &out)
 {
    if(shift < 0 || lagBars < 1) return false;
 
-   const int need = shift + 1 + lagBars;
-   if(ArraySize(high) < need || ArraySize(low) < need) return false;
-   if(ArraySize(close) <= shift)                       return false;
+   const int src = shift + lagBars;   // 遅行線が乗っている足
+   if(ArraySize(close) <= src) return false;
 
-   above = (close[shift] > SM_HighestHigh(high, shift + 1, lagBars));
-   below = (close[shift] < SM_LowestLow(low,   shift + 1, lagBars));
+   const double now = close[shift];
+
+   out.closeAbove = (now > close[src]);
+   out.closeBelow = (now < close[src]);
+   out.highAbove  = (now > high[src]);
+   out.lowBelow   = (now < low[src]);
+
+   SMValues v;
+   if(!SM_Calc(high, low, src, tenkanPeriod, kijunPeriod, spanBPeriod, v)) return false;
+
+   const double cloudTop    = MathMax(v.spanA, v.spanB);
+   const double cloudBottom = MathMin(v.spanA, v.spanB);
+   out.cloudAbove = (now > cloudTop);
+   out.cloudBelow = (now < cloudBottom);
    return true;
 }
 
@@ -200,6 +227,14 @@ bool SM_LagState(const double &high[],
 //|                                                                  |
 //| 既定の 5 本に資料の根拠は無い（資料は「傾きで判断」としか書いて   |
 //| いない）。階段1段の間隔より短い可能性がある。                     |
+//|                                                                  |
+//| **比較先は直近 slopeBars 本すべて**（2026-08-17 に変更）。今の値が |
+//| そのどれよりも低くなければ上向きとする。端の1点とだけ比べる形は   |
+//| やめた。途中を見ないと、**slopeBars 本前が谷なら、そこから上がっ  |
+//| て下がって戻ってきた足も「上向き」になる**（チャートで実例を確認。|
+//| 赤スパンが直近3本下がっているのに ④ が上向きと出た）。人工データ |
+//| では全足の 0.8% で起きる。切り替えは持たない — 目で見て下降して   |
+//| いる足を上向きと呼ぶ設定を残す理由が無い。                        |
 //+------------------------------------------------------------------+
 bool SM_SpanBSlope(const double &high[],
                    const double &low[],
@@ -214,16 +249,30 @@ bool SM_SpanBSlope(const double &high[],
    const int need = shift + slopeBars + spanBPeriod;
    if(ArraySize(high) < need || ArraySize(low) < need) return false;
 
-   const double now  = SM_Midpoint(high, low, shift,             spanBPeriod);
-   const double past = SM_Midpoint(high, low, shift + slopeBars, spanBPeriod);
+   const double now = SM_Midpoint(high, low, shift, spanBPeriod);
 
-   up   = (now >= past);
-   down = (now <= past);
+   // 直近 slopeBars 本の最大（上向きの判定用）と最小（下向きの判定用）
+   double hi = SM_Midpoint(high, low, shift + slopeBars, spanBPeriod);
+   double lo = hi;
+   for(int j = 1; j < slopeBars; j++)
+   {
+      const double v = SM_Midpoint(high, low, shift + j, spanBPeriod);
+      if(v > hi) hi = v;
+      if(v < lo) lo = v;
+   }
+
+   up   = (now >= hi);
+   down = (now <= lo);
    return true;
 }
 
 //+------------------------------------------------------------------+
 //| ルール2の入力                                                    |
+//|                                                                  |
+//| **②の3つを全て false にすると②を使わない判定になる。** ②専用の |
+//| 「使う／使わない」は持たない（同じことを2箇所で切り替えられると、|
+//| どちらが効いているのか分からなくなるため）。呼ぶ側は3つとも      |
+//| false のときに警告を出すこと。                                   |
 //+------------------------------------------------------------------+
 struct SMRule2Params
 {
@@ -231,7 +280,9 @@ struct SMRule2Params
    int  kijunPeriod;    // 基準線の期間
    int  spanBPeriod;    // 赤スパンの期間
    int  lagBars;        // 遅行線の本数
-   bool useLag;         // ②を条件に入れる
+   bool useLagClose;    // ②a 比較先の終値を超える
+   bool useLagHighLow;  // ②b 比較先の高値・安値を超える
+   bool useLagCloud;    // ②c 比較先の雲を完全に抜ける
    bool useClosePos;    // ③を条件に入れる
    bool useSlope;       // ④を条件に入れる
    int  slopeBars;      // ④傾きを見る本数
@@ -249,8 +300,7 @@ struct SMRule2Signal
 {
    bool flipBlue;     // ①雲が青へ転換した（買いの引き金）
    bool flipRed;      // ①雲が赤へ転換した（売りの引き金）
-   bool lagAbove;     // ②遅行スパンが陽転
-   bool lagBelow;     // ②遅行スパンが陰転
+   SMLagState lag;    // ②3通りの比べ方の結果（a 終値 / b 高安 / c 雲）
    bool closeAbove;   // ③終値が青スパンより上
    bool closeBelow;   // ③終値が青スパンより下
    bool spanBUp;      // ④赤スパンが上向き
@@ -298,8 +348,9 @@ bool SM_Rule2(const double &high[],
    out.flipBlue = (now.spanA > now.spanB) && !(prev.spanA > prev.spanB);
    out.flipRed  = (now.spanB > now.spanA) && !(prev.spanB > prev.spanA);
 
-   // ② 遅行スパンの陽転／陰転
-   if(!SM_LagState(high, low, close, shift, p.lagBars, out.lagAbove, out.lagBelow))
+   // ② 遅行スパンの位置（3通り。使うものを AND で重ねる）
+   if(!SM_LagState(high, low, close, shift, p.lagBars,
+                   p.tenkanPeriod, p.kijunPeriod, p.spanBPeriod, out.lag))
       return false;
 
    // ③ ローソク足と青スパンの位置関係（資料 p5-3）
@@ -312,14 +363,18 @@ bool SM_Rule2(const double &high[],
       return false;
 
    out.buy = out.flipBlue
-             && (!p.useLag      || out.lagAbove)
-             && (!p.useClosePos || out.closeAbove)
-             && (!p.useSlope    || out.spanBUp);
+             && (!p.useLagClose   || out.lag.closeAbove)
+             && (!p.useLagHighLow || out.lag.highAbove)
+             && (!p.useLagCloud   || out.lag.cloudAbove)
+             && (!p.useClosePos   || out.closeAbove)
+             && (!p.useSlope      || out.spanBUp);
 
    out.sell = out.flipRed
-              && (!p.useLag      || out.lagBelow)
-              && (!p.useClosePos || out.closeBelow)
-              && (!p.useSlope    || out.spanBDown);
+              && (!p.useLagClose   || out.lag.closeBelow)
+              && (!p.useLagHighLow || out.lag.lowBelow)
+              && (!p.useLagCloud   || out.lag.cloudBelow)
+              && (!p.useClosePos   || out.closeBelow)
+              && (!p.useSlope      || out.spanBDown);
 
    return true;
 }
