@@ -37,13 +37,14 @@ input ENUM_HIGHER_TF      InpHigherTF   = HTF_H1;      // 重ねる上位足
 input ENUM_SQUEEZE_METHOD InpMethod     = SQZ_BW_RANK; // 膠着の測り方
 input int                 InpPeriod     = 21;          // 期間（センターラインとσ）
 input int                 InpLookback   = 120;         // 順位を見る本数
-input double              InpThreshold  = 10.0;        // 膠着とみなす水準
+input double              InpThreshold  = 10.0;        // 膠着とみなす水準（順位方式のみ）
 input double              InpKcMult     = 1.5;         // ケルトナーの倍率
 
 double BufMeter[], BufColor[], BufSqueezed[];
 
-ENUM_TIMEFRAMES g_tf       = PERIOD_H1;
-int             g_needBars = 0;
+ENUM_TIMEFRAMES g_tf        = PERIOD_H1;
+int             g_needBars  = 0;
+double          g_threshold = 0.0;   // 実際に使う水準（③は入力を使わない）
 
 // 上位足1本につき1回だけ求めた結果。添字は上位足の shift（0 = 形成中）。
 double   g_meter[];
@@ -89,8 +90,10 @@ int OnInit()
                                    InpPeriod, InpLookback));
    IndicatorSetInteger(INDICATOR_DIGITS, 1);
 
+   g_threshold = SQZ_EffectiveThreshold(InpMethod, InpThreshold);
+
    IndicatorSetInteger(INDICATOR_LEVELS, 1);
-   IndicatorSetDouble(INDICATOR_LEVELVALUE, 0, InpThreshold);
+   IndicatorSetDouble(INDICATOR_LEVELVALUE, 0, g_threshold);
    IndicatorSetInteger(INDICATOR_LEVELSTYLE, 0, STYLE_DOT);
    IndicatorSetInteger(INDICATOR_LEVELCOLOR, 0, clrDimGray);
 
@@ -102,8 +105,13 @@ int OnInit()
       IndicatorSetDouble(INDICATOR_MAXIMUM, 100.0);
    }
 
-   PrintFormat("膠着の測り方: %s ／ この方法の推奨する水準: %.1f（今の設定は %.1f）",
-               SQZ_MethodLabel(InpMethod), SQZ_DefaultThreshold(InpMethod), InpThreshold);
+   if(SQZ_UsesRank(InpMethod))
+      PrintFormat("膠着の測り方: %s ／ 水準は %.1f（この方法の目安は %.1f）",
+                  SQZ_MethodLabel(InpMethod), g_threshold, SQZ_DefaultThreshold(InpMethod));
+   else
+      PrintFormat("膠着の測り方: %s ／ 境目は定義で決まるため「膠着とみなす水準」は使いません。"
+                  "調整するのはケルトナーの倍率（今は %.2f）のほうです",
+                  SQZ_MethodLabel(InpMethod), InpKcMult);
 
    if(InpMethod == SQZ_RANGE_RANK)
       Print("⑤は順位を見る本数を 6 にすると、Crabel の NR7（その足を含む7本で最小の値幅）そのものになります。順位は判定する足を母集団から外して数えるので、7本ぶんを見るには 6 を指定します");
@@ -247,7 +255,7 @@ int OnCalculate(const int rates_total,
          continue;
       }
 
-      const bool squeezed = (g_meter[s] <= InpThreshold);
+      const bool squeezed = (g_meter[s] <= g_threshold);
 
       BufMeter[i]    = g_meter[s];
       BufColor[i]    = squeezed ? 1 : 0;
