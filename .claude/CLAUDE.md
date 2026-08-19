@@ -43,6 +43,14 @@
 - 起動後の完了判定は `gh pr checks` の **`description`** を読む（`state` だけでは判定できない）。`SUCCESS` / `Review completed` が完了、`SUCCESS` / **`Review rate limited` はレビューが走っていない**。**`PENDING`（Review in progress）から `Review rate limited` へ落ちることもある**（2026-08-08 PR #10）。`state` だけを見ると、1行もレビューされていないのに「指摘ゼロで通過」と報告してしまう。
 - **実際にレビューされたかの裏取り**は、ウォークスルーの `Reviewing files that changed ... between <old_sha> and <new_sha>` と `Files selected for processing (N)` を読む。応答が `Action performed / Review finished` だけでは、増分スキップと区別できない。
 
+### PR の説明文を上書きされる（2026-08-19 PR #17 で発生）
+
+**CodeRabbit はレビュー時に PR 本文を自分の「Summary by CodeRabbit」ブロックだけに置き換えることがある。** 追記ではなく丸ごと差し替えで、こちらが書いた概要・変更点・検証欄が消える。
+
+- 後から PR 本文を編集するときは、**`gh pr view --json body` で現状を取ってから確認する**。前に書いた内容が残っている前提で追記すると、消えたことに気づかない。
+- 復元するときは、自動生成ブロック（`<!-- ... release notes by coderabbit.ai -->` で挟まれた範囲）を末尾に残したまま、自前の説明をその前に置く。
+- **消えて困る情報を PR 本文だけに置かない。** 検証の実施・未実施は `docs/` かコミットメッセージにも残す。
+
 ## MQL5 ビルド（コンパイル検証）
 
 **`.claude/rules/mql5-build.md` に移した**（2026-08-08）。`.mq5` / `.mqh` を扱うときだけ読み込まれる設定（`paths` 指定）にしてある。
