@@ -14,12 +14,14 @@ Include\Signals\
   SpanModel.mqh        … スパンA/B・遅行線の計算 ＋ ルール2の判定
   HigherTf.mqh         … 上位足の選択肢と、下位足へ並べるときの位置決め（§2.4）
   Squeeze.mqh          … 膠着の測り方5通り（trading_rules.md §6.1）
+  Pivot.mqh            … デイリーピボットの計算（indicator_spec.md §5）
 
 Indicators\
   SuperBollinger.mq5      … チャート描画（N4 の目視確認用）
   SpanModel.mq5
   SuperBollingerMTF.mq5   … 上位足のスーパーボリンジャーを下位足へ重ねる（N5-8）
   SqueezeGauge.mq5        … 膠着メーター。別ウィンドウ・測り方を切替（N5-8）
+  DailyPivot.mq5          … デイリーピボット7本。反転の目安を目で確かめる用
 
 Experts\
   EaSpanBollinger.mq5  … ルール1／ルール2 を input で選んで売買
