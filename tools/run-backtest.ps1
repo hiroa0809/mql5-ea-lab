@@ -42,6 +42,9 @@ param(
     [switch]$Optimize,                                   # 総当たりにする
     [string]$Report = '',                                # 総当たりの結果 XML（絶対パス）
 
+    # エントリーのきっかけ 0=雲の色が変わったとき 1=膠着が始まったとき 2=どちらでも
+    [string]$EntryTrigger = '0',
+
     # スパンモデル側
     [string]$Tenkan       = '9',
     [string]$Kijun        = '26',
@@ -116,6 +119,7 @@ $inputLines = @(
     Format-TesterInput 'InpSlopeMode'       $SlopeMode
     Format-TesterInput 'InpEntryDelayBars'  $EntryDelay
     Format-TesterInput 'InpExitDelayBars'   $ExitDelay
+    Format-TesterInput 'InpEntryTrigger'    $EntryTrigger
     Format-TesterInput 'InpSqueezeUse'      $SqueezeUse
     Format-TesterInput 'InpSqueezeTF'       $SqueezeTF
     Format-TesterInput 'InpSqueezePeriod'   $SqueezePeriod
@@ -160,6 +164,12 @@ Write-Host "設定: $ini"
 Write-Host "実行: $Symbol $Period  $From 〜 $To  ティック=$Model  $(if ($Optimize) { '総当たり' } else { '単発' })  識別名=$Tag"
 $inputLines | Where-Object { $_ -match '\|\|Y$' } | ForEach-Object { Write-Host "  振る: $_" }
 
+# 起動時刻を控える。**今回の実行で書かれたレポートだけを成功と認めるため。**
+# 同じ名前の古いレポートが残っていると、MT5 が書けずに終わっても前回の結果を
+# 拾って成功に見える。秒未満を落とすのは、ファイル時刻の分解能が粗い環境で
+# 自分が作ったファイルを取りこぼさないため。
+$startedAt = (Get-Date).AddSeconds(-1)
+
 $sw = [System.Diagnostics.Stopwatch]::StartNew()
 
 # 設定ファイルのパスは引用する。%TEMP% にユーザー名が入るため、名前に空白が
@@ -184,12 +194,15 @@ Write-Host ("終了まで {0:N1} 分" -f $sw.Elapsed.TotalMinutes)
 
 if ($Report) {
     # MT5 は拡張子を補うことがあるので、指定名で始まるものを探す。
+    # **今回の実行で書かれたものだけを認める。** 古い同名レポートが残って
+    # いると、MT5 が書けずに終わっても前回の結果を拾って成功に見える。
     $dir  = Split-Path -Parent $Report
     $stem = [System.IO.Path]::GetFileNameWithoutExtension($Report)
     $found = @(Get-ChildItem $dir -Filter "$stem*" -ErrorAction SilentlyContinue |
+               Where-Object { $_.LastWriteTime -ge $startedAt } |
                Sort-Object LastWriteTime -Descending)
     if ($found.Count -eq 0) {
-        Write-Error "結果ファイルが見つかりません（$Report）。テスターのログを確認してください。"
+        Write-Error "今回の実行で書かれた結果ファイルがありません（$Report）。テスターのログを確認してください。同名の古いファイルがあっても成功とは扱いません。"
     }
     Write-Host ("出力: {0}  ({1:N0} バイト)" -f $found[0].FullName, $found[0].Length)
 }

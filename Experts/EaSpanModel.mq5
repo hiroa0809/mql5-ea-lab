@@ -375,8 +375,21 @@ bool SqueezeCalc(const int sqzShift, bool &active)
    double raw[];
    if(ArrayResize(raw, need) < need) return false;
 
+   // 時刻別は同じ時刻の足しか母集団に入らない（24本に1本）。**入らない
+   // 足の値は最初から計算しない。** 遡る範囲が本数の32倍あるので、全部
+   // 求めると23/24を捨てるためだけに作ることになり、売買する足と同じ足で
+   // 測る設定では毎足それが走って5分足のテストが桁で延びる。
+   const bool sameHour = SQZ_UsesHour(g_sqzMethod);
+   const int  curHour  = sameHour ? SQZ_HourOf(time[sqzShift]) : 0;
+
    for(int i = 0; i < need; i++)
    {
+      if(sameHour && SQZ_HourOf(time[i]) != curHour)
+      {
+         raw[i] = EMPTY_VALUE;
+         continue;
+      }
+
       double v = 0.0;
       bool   ok = false;
 
@@ -391,8 +404,7 @@ bool SqueezeCalc(const int sqzShift, bool &active)
    }
 
    double pct;
-   if(!SQZ_Rank(raw, time, sqzShift, InpSqueezeLookback,
-                SQZ_UsesHour(g_sqzMethod), pct)) return false;
+   if(!SQZ_Rank(raw, time, sqzShift, InpSqueezeLookback, sameHour, pct)) return false;
 
    active = SQZ_IsSqueezed(g_sqzMethod, pct, g_sqzThreshold);
    return true;
@@ -427,6 +439,7 @@ void SqueezeUpdate(const int shift)
    if(!SqueezeBarShift(shift, sqzShift, sqzBar))
    {
       g_cntSqzNoData++;
+      g_sqzHaveBar = false;   // 下の「始まり」の判定を参照
       return;
    }
 
@@ -440,6 +453,12 @@ void SqueezeUpdate(const int shift)
    if(!SqueezeCalc(sqzShift, active))
    {
       g_cntSqzNoData++;
+
+      // **判定できなかったら印を下げる。** 下げないと、判定が数本飛んだ
+      // 後で膠着していたときに、その間ずっと続いていたかもしれない膠着を
+      // 「始まった」と数えてしまう。飛んだ区間は分からないのだから、
+      // 分からないままにして始まりとは数えない。
+      g_sqzHaveBar = false;
       return;
    }
 

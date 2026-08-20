@@ -179,6 +179,21 @@ bool SQZ_KeltnerRatio(const double &close[], const double &high[], const double 
 }
 
 //+------------------------------------------------------------------+
+//| 足の時刻から「時」だけを取り出す                                 |
+//|                                                                  |
+//| **1箇所に置くのは、母集団を絞る側と、値を用意する側で判定がずれ  |
+//| ないようにするため。** ずれると、用意した値が数えられなかったり、|
+//| 数えるべき足の値が空だったりして、順位が黙って変わる。            |
+//|                                                                  |
+//| 時刻は 1970年からの秒数なので、割り算で求まる。TimeToStruct は    |
+//| 構造体をまるごと埋めるため、本数ぶん呼ぶ所では割に合わない。      |
+//+------------------------------------------------------------------+
+int SQZ_HourOf(const datetime t)
+{
+   return (int)((t % 86400) / 3600);
+}
+
+//+------------------------------------------------------------------+
 //| 順位 — 過去N本の中で下から何%の位置にいるか                      |
 //|                                                                  |
 //| 判定する足そのものは母集団に入れない（shift+1 から遡る）。       |
@@ -201,8 +216,7 @@ bool SQZ_Rank(const double &values[], const datetime &time[], const int shift,
    if(ArraySize(time) < size)         return false;
    if(values[shift] == EMPTY_VALUE)   return false;
 
-   MqlDateTime cur;
-   TimeToStruct(time[shift], cur);
+   const int curHour = SQZ_HourOf(time[shift]);
 
    int taken = 0;
    int below = 0;
@@ -211,12 +225,7 @@ bool SQZ_Rank(const double &values[], const datetime &time[], const int shift,
    {
       if(values[j] == EMPTY_VALUE) continue;
 
-      if(sameHour)
-      {
-         MqlDateTime t;
-         TimeToStruct(time[j], t);
-         if(t.hour != cur.hour) continue;
-      }
+      if(sameHour && SQZ_HourOf(time[j]) != curHour) continue;
 
       taken++;
       if(values[j] < values[shift]) below++;
