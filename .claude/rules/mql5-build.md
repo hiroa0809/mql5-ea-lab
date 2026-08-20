@@ -41,6 +41,32 @@ MT5 同梱の MetaEditor を CLI で呼ぶ。VSCode 拡張は不要。**使用�
 
 他ブローカー（FXGT / OANDA）のデータフォルダ ID は `docs/lessons_learned.md`。本プロジェクトでは XM しか使わない。
 
+## コマンドラインからテスターを走らせる（2026-08-20 実証）
+
+設定ファイルを渡して端末を起動すると、テスターが自動で走る。
+
+```powershell
+Start-Process "C:\Program Files\XM Trading MT5\terminal64.exe" -ArgumentList "/config:C:\path\to\run.ini"
+```
+
+- **設定ファイルは UTF-16 で書く。** UTF-8 だと MT5 は**エラーも出さずに無視**し、端末が普通に起動するだけで終わる（1回目はこれで空振りした）。`[System.IO.File]::WriteAllText($ini, $body, [System.Text.Encoding]::Unicode)`
+- **端末が起動中だと設定を渡せない。** 先に閉じる（`(Get-Process terminal64).CloseMainWindow()`）。
+- 読み込まれたかは端末ログの `Startup ... successfully initialized from start config "<path>"`、走り出したかは `Tester automatic testing started` で判定する。
+- 最小の設定はこれで足りる（`Model=2` は「始値のみ」）:
+  ```ini
+  [Tester]
+  Expert=mql5-ea-lab\<EA名>
+  Symbol=USDJPY#
+  Period=D1
+  Model=2
+  Optimization=0
+  FromDate=1999.01.01
+  ToDate=2026.08.18
+  ShutdownTerminal=0
+  Visual=0
+  ```
+- EA が `FILE_COMMON` で書いた CSV は `%APPDATA%\MetaQuotes\Terminal\Common\Files\` に出る（`%APPDATA%\MetaQuotes\Common\Files` ではない）。
+- テスターのログは `<データフォルダ>\Tester\logs\<日付>.log`（UTF-16LE）。履歴の実際の範囲は `history begins from ...` 行で読める。
 ## 報告のルール
 
 コンパイルを**実際に走らせていない**のに「検証済み」と書かない。走らせた場合は `Result:` 行の実数値（例: `0 errors, 0 warnings`）を報告に含める。
