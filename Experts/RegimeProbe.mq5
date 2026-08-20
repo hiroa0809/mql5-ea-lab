@@ -31,7 +31,7 @@
 //|   使うこと**（絶対値に意味は無い）。                             |
 //+------------------------------------------------------------------+
 #property copyright "mql5-ea-lab"
-#property version   "1.01"
+#property version   "1.02"
 #property strict
 
 input string InpCsvPrefix = "regime";   // CSV のファイル名プレフィックス
@@ -48,6 +48,7 @@ struct RegimeStat
 {
    int      bars;       // 日足の本数
    double   open;       // 最初の日の始値
+   double   firstClose; // 最初の日の終値（効率比の起点。下記）
    double   close;      // 最後の日の終値
    double   high;       // 期間中の最高値
    double   low;        // 期間中の最安値
@@ -70,10 +71,11 @@ void AddBar(RegimeStat &s, const MqlRates &r)
 {
    if(s.bars == 0)
    {
-      s.open      = r.open;
-      s.high      = r.high;
-      s.low       = r.low;
-      s.firstTime = r.time;
+      s.open       = r.open;
+      s.firstClose = r.close;
+      s.high       = r.high;
+      s.low        = r.low;
+      s.firstTime  = r.time;
    }
    else
    {
@@ -91,12 +93,17 @@ void AddBar(RegimeStat &s, const MqlRates &r)
 //+------------------------------------------------------------------+
 //| 効率比 — 正味の値動き ÷ 歩いた距離                               |
 //|                                                                  |
+//| **分子の起点は最初の日の「終値」で、始値ではない。** 歩いた距離を |
+//| 終値どうしの差で足し上げているため、始値を起点にすると分子だけが  |
+//| 1日ぶん長い区間を測ることになり、初日の始値と終値が離れていると    |
+//| 効率比が 1 を超える。日数の少ない月別の集計で特に効く。            |
+//|                                                                  |
 //| 歩いた距離が 0（＝日足1本しか無い）のときは求められないので -1。 |
 //+------------------------------------------------------------------+
 double EfficiencyRatio(const RegimeStat &s)
 {
    if(s.bars < 2 || s.path <= 0.0) return -1.0;
-   return MathAbs(s.close - s.open) / s.path;
+   return MathAbs(s.close - s.firstClose) / s.path;
 }
 
 //+------------------------------------------------------------------+
@@ -226,8 +233,18 @@ void Measure()
 {
    PrintFormat("=== 相場つきの実測: %s ===", _Symbol);
 
+   // 形成中の日足は終値・高値・安値が確定していない。入れてしまうと、
+   // 走らせた時刻によって当月・当年の値が変わる。現在の足の1秒手前で
+   // 切って締め出す。
+   const datetime current = iTime(_Symbol, PERIOD_D1, 0);
+   if(current <= 0)
+   {
+      Print("日足の時刻を取得できませんでした");
+      return;
+   }
+
    MqlRates rates[];
-   const int n = CopyRates(_Symbol, PERIOD_D1, D'1970.01.01', TimeCurrent(), rates);
+   const int n = CopyRates(_Symbol, PERIOD_D1, D'1970.01.01', current - 1, rates);
    if(n <= 0)
    {
       PrintFormat("日足を読めませんでした（エラー %d）", GetLastError());

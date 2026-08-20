@@ -34,34 +34,75 @@
 //| 銘柄・時間足は入力にせず _Symbol / _Period を使う。テスターの     |
 //| 設定がそのまま反映される（docs/implementation_design.md §1）。    |
 //+------------------------------------------------------------------+
-#property version   "1.00"
+#property version   "1.10"
 #property description "スパンモデル単体（ルール2）。指標の矢印と同じ条件で売買する"
 
 #include <Trade\Trade.mqh>
 #include <Signals\SpanModel.mqh>
 
-//--- 指標 SpanModel.mq5 と同じ並び・同じ表示名。設定画面を見比べたときに
-//--- 1行ずつ対応が取れるようにしてある。値も指標側と同じにすること。
-input int  InpTenkan        = 9;      // 転換線の期間
-input int  InpKijun         = 26;     // 基準線の期間
-input int  InpSpanB         = 52;     // 赤スパンの期間
-input int  InpLagBars       = 26;     // 遅行線の本数
-input bool InpUseLagClose   = false;  // ②a 遅行スパンが重なる足の終値を抜けている
-input bool InpUseLagHighLow = true;   // ②b 遅行スパンが重なる足の高値安値を抜けている
-input bool InpUseLagCloud   = true;   // ②c 遅行スパンが重なる足の雲を抜けている
-input bool InpUseClosePos   = true;   // ③終値と青スパンの位置関係を条件に入れる
-input bool InpUseSlope      = false;  // ④長期スパンの傾きを条件に入れる
-input int  InpSlopeBars     = 5;      // ④傾きを見る本数
+//+------------------------------------------------------------------+
+//| ②遅行スパンを何と比べるか                                        |
+//|                                                                  |
+//| **1項目にまとめてあるのは、総当たりで同じ結果を二度測らないため。**|
+//| 以前は「終値」「高値安値」「雲」を別々の入り切りにしていたが、    |
+//| 終値と高値安値を同時に入れた組み合わせは、高値安値だけの場合と    |
+//| 結果が完全に一致する（高値を抜けていれば終値も必ず抜けている）。  |
+//| 実測でも 320 組すべてが一致した（PR #18）。8通りのうち2通りが     |
+//| 無駄になるため、成立しうる6通りだけを並べた。                     |
+//+------------------------------------------------------------------+
+enum ENUM_SM_LAG
+{
+   SM_LAG_NONE          = 0,   // 使わない
+   SM_LAG_CLOSE         = 1,   // a 重なる足の終値を抜けている
+   SM_LAG_HIGHLOW       = 2,   // b 重なる足の高値安値を抜けている
+   SM_LAG_CLOUD         = 3,   // c 重なる足の雲を抜けている
+   SM_LAG_CLOSE_CLOUD   = 4,   // a+c 終値と雲の両方
+   SM_LAG_HIGHLOW_CLOUD = 5    // b+c 高値安値と雲の両方
+};
+
+//+------------------------------------------------------------------+
+//| ④長期スパンの傾きを条件に入れるか、入れるなら何本前と比べるか    |
+//|                                                                  |
+//| **入り切りと本数を1項目にまとめてあるのも重複を消すため。** 別々  |
+//| だと、切ったときに本数を振っても結果が変わらない組み合わせが並ぶ  |
+//| （実測で 64 組すべてが一致・PR #18）。                            |
+//|                                                                  |
+//| 値がそのまま本数になっている（0 だけが「使わない」）。            |
+//+------------------------------------------------------------------+
+enum ENUM_SM_SLOPE
+{
+   SM_SLOPE_OFF = 0,   // 使わない
+   SM_SLOPE_1   = 1,   // 1本前と比べる
+   SM_SLOPE_2   = 2,   // 2本前と比べる
+   SM_SLOPE_3   = 3,   // 3本前と比べる
+   SM_SLOPE_4   = 4,   // 4本前と比べる
+   SM_SLOPE_5   = 5    // 5本前と比べる
+};
+
+//--- 指標 SpanModel.mq5 と同じ計算をさせるための項目。
+//--- ②と④は上記のとおり1項目にまとめてあるので、指標の設定画面とは
+//--- 行数が違う。中身は同じで、起動時にログへ実際の設定を出す。
+input int           InpTenkan      = 9;                      // 転換線の期間
+input int           InpKijun       = 26;                     // 基準線の期間
+input int           InpSpanB       = 52;                     // 赤スパンの期間
+input int           InpLagBars     = 26;                     // 遅行線の本数
+input ENUM_SM_LAG   InpLagMode     = SM_LAG_HIGHLOW_CLOUD;   // ②遅行スパンを何と比べるか
+input bool          InpUseClosePos = true;                   // ③終値と青スパンの位置関係を条件に入れる
+input ENUM_SM_SLOPE InpSlopeMode   = SM_SLOPE_OFF;           // ④長期スパンの傾き
 
 //--- ここから下は EA だけが持つ項目（指標には無い）
 //--- 「何本後」は条件が揃った足を 0 本目として数える。1 = 次の足の始値
 //--- （通常の自動売買）、2 = そのさらに1本後の始値（既定）。
-input int    InpEntryDelayBars = 2;          // エントリーを何本後の足の始値で出すか
-input int    InpExitDelayBars  = 2;          // 決済を何本後の足の始値で出すか
-input double InpLots           = 0.10;       // ロット
-input long   InpMagic          = 20260819;   // マジックナンバー
-input bool   InpPrintCounters  = true;       // 条件別の成立回数を出力する
-input bool   InpShowIndicator  = true;       // チャートにスパンモデルを表示する
+input int InpEntryDelayBars = 2;   // エントリーを何本後の足の始値で出すか
+input int InpExitDelayBars  = 2;   // 決済を何本後の足の始値で出すか
+
+//--- 売買の中身に関わらない項目。**sinput は最適化の対象にならない。**
+//--- 総当たりに紛れ込ませても結果が変わらないのに実行回数だけ倍になる
+//--- ため（診断ログの入り切りで 640 組すべてが一致・PR #18）。
+sinput double InpLots          = 0.10;       // ロット
+sinput long   InpMagic         = 20260819;   // マジックナンバー
+sinput bool   InpPrintCounters = true;       // 条件別の成立回数を出力する
+sinput bool   InpShowIndicator = true;       // チャートにスパンモデルを表示する
 
 CTrade        g_trade;
 SMRule2Params g_params;
@@ -77,14 +118,63 @@ int           g_smHandle = INVALID_HANDLE;   // 表示用に読み込んだ指�
 //--- ①が向きを決める引き金なので、ここだけは①の成立足に限る。
 long g_cntFlip = 0, g_cntLag = 0, g_cntClosePos = 0, g_cntSlope = 0;
 long g_cntBuySignal = 0, g_cntSellSignal = 0;
-long g_cntEntry = 0, g_cntExit = 0, g_cntOrderFailed = 0;
+long g_cntEntry = 0, g_cntExit = 0, g_cntOrderFailed = 0, g_cntBlocked = 0;
+
+//+------------------------------------------------------------------+
+//| ②の選択を、共通ファイルが要求する3つの入り切りへ展開する         |
+//+------------------------------------------------------------------+
+void ApplyLagMode(const ENUM_SM_LAG m, SMRule2Params &p)
+{
+   p.useLagClose   = (m == SM_LAG_CLOSE   || m == SM_LAG_CLOSE_CLOUD);
+   p.useLagHighLow = (m == SM_LAG_HIGHLOW || m == SM_LAG_HIGHLOW_CLOUD);
+   p.useLagCloud   = (m == SM_LAG_CLOUD   || m == SM_LAG_CLOSE_CLOUD
+                                          || m == SM_LAG_HIGHLOW_CLOUD);
+}
+
+//+------------------------------------------------------------------+
+//| ②の選択を日本語にする（起動時のログ用）                          |
+//+------------------------------------------------------------------+
+string LagModeText(const ENUM_SM_LAG m)
+{
+   switch(m)
+   {
+      case SM_LAG_NONE:          return "使わない";
+      case SM_LAG_CLOSE:         return "a 終値";
+      case SM_LAG_HIGHLOW:       return "b 高値安値";
+      case SM_LAG_CLOUD:         return "c 雲";
+      case SM_LAG_CLOSE_CLOUD:   return "a+c 終値と雲";
+      case SM_LAG_HIGHLOW_CLOUD: return "b+c 高値安値と雲";
+   }
+   return "不明";
+}
+
+//+------------------------------------------------------------------+
+//| 取引が本当に通ったかを結果コードで確かめる                       |
+//|                                                                  |
+//| **CTrade の Buy / Sell / PositionClose が返す true は「要求が     |
+//| サーバーへ送られた」ことしか意味しない。** 標準ライブラリの       |
+//| CTrade::OrderSend は ::OrderSend() の戻り値をそのまま返しており、 |
+//| 結果コードを見ていない（Trade.mqh を実際に確認・PR #18）。        |
+//| 拒否された取引を成功に数えると、診断の取引回数が実態と食い違う。  |
+//|                                                                  |
+//| 一部だけ約定した場合（TRADE_RETCODE_DONE_PARTIAL）は成功に数え    |
+//| ない。建玉が残るが、手仕舞いの判定は「雲の色が反対のあいだ」ずっと|
+//| 成立するので、次の足でもう一度決済を試みる。                      |
+//+------------------------------------------------------------------+
+bool TradeSucceeded(const bool sent)
+{
+   if(!sent) return false;
+
+   const uint rc = g_trade.ResultRetcode();
+   return (rc == TRADE_RETCODE_DONE || rc == TRADE_RETCODE_PLACED);
+}
 
 //+------------------------------------------------------------------+
 //| テスターのチャートに同じ設定のスパンモデルを載せる               |
 //|                                                                  |
 //| 矢印が出た足と、実際に建てた位置を目で突き合わせるため。指標へ渡 |
-//| す引数は EA の入力と同じ順・同じ値にする。ずれると、EA が売買し  |
-//| た条件とは違う条件の矢印を見比べることになる。                   |
+//| す引数は EA が実際に使う値と同じにする。②は指標側が3つの入り切り |
+//| なので、展開したものを渡す。                                     |
 //|                                                                  |
 //| **矢印は約定より手前に立つ。** 指標は条件が揃った足に印を出し、   |
 //| EA はその InpEntryDelayBars 本後の始値で建てるため。ずれて見える |
@@ -107,8 +197,9 @@ void ShowIndicator()
    {
       g_smHandle = iCustom(_Symbol, _Period, paths[i],
                            InpTenkan, InpKijun, InpSpanB, InpLagBars,
-                           InpUseLagClose, InpUseLagHighLow, InpUseLagCloud,
-                           InpUseClosePos, InpUseSlope, InpSlopeBars);
+                           g_params.useLagClose, g_params.useLagHighLow,
+                           g_params.useLagCloud, g_params.useClosePos,
+                           g_params.useSlope, g_params.slopeBars);
       if(g_smHandle == INVALID_HANDLE)
       {
          ResetLastError();
@@ -142,11 +233,6 @@ int OnInit()
       Print("遅行線の本数は 1 以上にしてください");
       return INIT_PARAMETERS_INCORRECT;
    }
-   if(InpSlopeBars < 1)
-   {
-      Print("④傾きを見る本数は 1 以上にしてください（0 では常に平らになる）");
-      return INIT_PARAMETERS_INCORRECT;
-   }
    if(InpEntryDelayBars < 1 || InpExitDelayBars < 1)
    {
       Print("エントリー・決済を出す本数は 1 以上にしてください（1 = 次の足の始値）");
@@ -171,26 +257,34 @@ int OnInit()
       return INIT_PARAMETERS_INCORRECT;
    }
 
-   // ②は3つとも切りにすると「②を使わない」になる。設定画面を見返さ
-   // なくても気づけるよう、起動のたびにログへ出す（指標と同じ扱い）。
-   if(!InpUseLagClose && !InpUseLagHighLow && !InpUseLagCloud)
-      Print("②遅行スパンは3つとも切りのため、条件に入れません（①③④だけで判定します）");
+   g_params.tenkanPeriod = InpTenkan;
+   g_params.kijunPeriod  = InpKijun;
+   g_params.spanBPeriod  = InpSpanB;
+   g_params.lagBars      = InpLagBars;
+   g_params.useClosePos  = InpUseClosePos;
+   ApplyLagMode(InpLagMode, g_params);
 
-   g_params.tenkanPeriod  = InpTenkan;
-   g_params.kijunPeriod   = InpKijun;
-   g_params.spanBPeriod   = InpSpanB;
-   g_params.lagBars       = InpLagBars;
-   g_params.useLagClose   = InpUseLagClose;
-   g_params.useLagHighLow = InpUseLagHighLow;
-   g_params.useLagCloud   = InpUseLagCloud;
-   g_params.useClosePos   = InpUseClosePos;
-   g_params.useSlope      = InpUseSlope;
-   g_params.slopeBars     = InpSlopeBars;
+   // 「使わない」を選んだときも、傾きを求める関数は 1 以上の本数を要求
+   // するため 1 を入れておく。結果は使われない。
+   g_params.useSlope  = (InpSlopeMode != SM_SLOPE_OFF);
+   g_params.slopeBars = (InpSlopeMode == SM_SLOPE_OFF) ? 1 : (int)InpSlopeMode;
+
+   // **実際に効いている設定を毎回ログへ出す。** 入力項目の構成を変えた
+   // ため、古い .set を読み込むと消えた項目は既定値で埋まる。黙って別の
+   // 条件で走るのを防ぐには、走り出しに実物を出すしかない。
+   PrintFormat("設定: ②%s ／ ③%s ／ ④%s ／ エントリー %d 本後 ／ 決済 %d 本後",
+               LagModeText(InpLagMode),
+               InpUseClosePos ? "使う" : "使わない",
+               g_params.useSlope ? StringFormat("%d本前と比べる", g_params.slopeBars) : "使わない",
+               InpEntryDelayBars, InpExitDelayBars);
+
+   if(InpLagMode == SM_LAG_NONE)
+      Print("②遅行スパンは条件に入れません（①③④だけで判定します）");
 
    // 必要本数は入力値から求める（固定値を書くと入力を変えた瞬間に嘘に
    // なる）。SM_RequiredBars は判定足を1本前とした本数なので、判定を
    // さらに手前へずらすぶんを足す。
-   g_needBars = SM_RequiredBars(InpTenkan, InpKijun, InpSpanB, InpLagBars, InpSlopeBars)
+   g_needBars = SM_RequiredBars(InpTenkan, InpKijun, InpSpanB, InpLagBars, g_params.slopeBars)
                 + MathMax(InpEntryDelayBars, InpExitDelayBars);
 
    g_trade.SetExpertMagicNumber((ulong)InpMagic);
@@ -219,8 +313,9 @@ void OnDeinit(const int reason)
 
    PrintFormat("[ルール2] ①雲の転換 %I64d   （うち②を通った %I64d / ③ %I64d / ④ %I64d）",
                g_cntFlip, g_cntLag, g_cntClosePos, g_cntSlope);
-   PrintFormat("          サイン 買い %I64d / 売り %I64d   建玉 %I64d / 決済 %I64d   発注失敗 %I64d",
-               g_cntBuySignal, g_cntSellSignal, g_cntEntry, g_cntExit, g_cntOrderFailed);
+   PrintFormat("          サイン 買い %I64d / 売り %I64d   建玉 %I64d / 決済 %I64d   発注失敗 %I64d   他建玉で見送り %I64d",
+               g_cntBuySignal, g_cntSellSignal, g_cntEntry, g_cntExit,
+               g_cntOrderFailed, g_cntBlocked);
    PrintFormat("          執行: エントリー %d 本後 / 決済 %d 本後（1 = 次の足の始値）",
                InpEntryDelayBars, InpExitDelayBars);
 }
@@ -290,6 +385,32 @@ bool FindPosition(ulong &ticket, ENUM_POSITION_TYPE &type)
 }
 
 //+------------------------------------------------------------------+
+//| 他人の建玉を巻き込む恐れがあるか                                 |
+//|                                                                  |
+//| **ネッティング口座は銘柄ごとに建玉を1つしか持てない。** 別のEAや  |
+//| 手動で建てた玉がある状態で成行を送ると、新しい建玉ができるのでは |
+//| なく、その玉が増減・決済・反転する。マジックナンバーで絞っても、  |
+//| 建玉そのものが共有なので防げない（PR #18 の指摘）。               |
+//|                                                                  |
+//| ヘッジ口座では建玉が別々に立つので、この制限は掛けない。          |
+//+------------------------------------------------------------------+
+bool ForeignPositionBlocks()
+{
+   if(AccountInfoInteger(ACCOUNT_MARGIN_MODE) != ACCOUNT_MARGIN_MODE_RETAIL_NETTING)
+      return false;
+
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      const ulong t = PositionGetTicket(i);
+      if(t == 0) continue;
+      if(PositionGetString(POSITION_SYMBOL) != _Symbol) continue;
+      if(PositionGetInteger(POSITION_MAGIC) == InpMagic) continue;
+      return true;
+   }
+   return false;
+}
+
+//+------------------------------------------------------------------+
 //| 判定と執行 — 足が確定したときだけ動く                            |
 //|                                                                  |
 //| 「条件が揃った足の N 本後の始値で執行する」を、足が変わった時点で |
@@ -316,12 +437,12 @@ void OnTick()
                         || (type == POSITION_TYPE_SELL && cloud ==  1);
       if(flipped)
       {
-         if(g_trade.PositionClose(ticket))
+         if(TradeSucceeded(g_trade.PositionClose(ticket)))
             g_cntExit++;
          else
          {
             g_cntOrderFailed++;
-            PrintFormat("決済に失敗しました（チケット %I64u / 結果 %u %s）",
+            PrintFormat("決済できませんでした（チケット %I64u / 結果 %u %s）",
                         ticket, g_trade.ResultRetcode(), g_trade.ResultRetcodeDescription());
          }
       }
@@ -356,15 +477,22 @@ void OnTick()
    // 同じ足で決済と反対建てが起きる（ドテン）。
    if(FindPosition(ticket, type)) return;
 
-   const bool ok = s.buy
-                   ? g_trade.Buy (InpLots, _Symbol)
-                   : g_trade.Sell(InpLots, _Symbol);
-   if(ok)
+   // ネッティング口座で他人の建玉があるときは何もしない
+   if(ForeignPositionBlocks())
+   {
+      g_cntBlocked++;
+      return;
+   }
+
+   const bool sent = s.buy
+                     ? g_trade.Buy (InpLots, _Symbol)
+                     : g_trade.Sell(InpLots, _Symbol);
+   if(TradeSucceeded(sent))
       g_cntEntry++;
    else
    {
       g_cntOrderFailed++;
-      PrintFormat("発注に失敗しました（%s / 結果 %u %s）",
+      PrintFormat("建てられませんでした（%s / 結果 %u %s）",
                   s.buy ? "買い" : "売り",
                   g_trade.ResultRetcode(), g_trade.ResultRetcodeDescription());
    }
