@@ -261,16 +261,44 @@ double SQZ_EffectiveThreshold(const ENUM_SQUEEZE_METHOD method, const double inp
 }
 
 //+------------------------------------------------------------------+
+//| その値が膠着とみなす側かどうか                                   |
+//|                                                                  |
+//| **比べ方をここに1つだけ置くのは、EA とインジケーターで境目がずれ |
+//| るのを防ぐため。** 別々に書くと、チャートで金色に見えている足で   |
+//| EA が建てない（またはその逆）という、目視では原因の分からない     |
+//| 食い違いが起きる。                                                |
+//|                                                                  |
+//| 順位方式は「水準以下」。下から10%なら 10 ちょうども膠着に入れる。 |
+//| ケルトナーは「100 未満」。境目は「帯がケルトナーの内側に完全に    |
+//| 入ったか」で、ちょうど接した状態は内側ではない。                  |
+//+------------------------------------------------------------------+
+bool SQZ_IsSqueezed(const ENUM_SQUEEZE_METHOD method, const double value, const double threshold)
+{
+   if(value == EMPTY_VALUE) return false;
+
+   if(method == SQZ_KELTNER) return (value <  threshold);
+   return                           (value <= threshold);
+}
+
+//+------------------------------------------------------------------+
 //| 必要とする最小の履歴本数                                         |
 //|                                                                  |
 //| 時刻別は同じ時刻が24本に1度しか来ないので、遡る範囲が24倍要る。  |
-//| 週末で並びが飛ぶぶんは余裕を見ず、足りなければ順位を出さない。   |
+//|                                                                  |
+//| **ちょうど24倍では足りない。** 同じ時刻の足は1営業日に1本ずつ現れ |
+//| るので、24倍だけ遡ると母集団はちょうど必要数になり、余りがない。  |
+//| 祝日で1日抜けた瞬間に1本足りなくなり、順位を出せない足が生まれる。|
+//| 順位が出せない足は「膠着していなかった」足と見分けが付かず、その  |
+//| 測り方だけ一度も成立しないまま「効かない」と誤読される。          |
+//|                                                                  |
+//| 遡る範囲を広げても、必要数に達した時点で数え終わるので計算量は    |
+//| 変わらない。増えるのは用意する配列の長さだけ。                    |
 //+------------------------------------------------------------------+
 int SQZ_RequiredBars(const ENUM_SQUEEZE_METHOD method, const int period, const int lookback)
 {
    if(method == SQZ_KELTNER) return period + 2;
 
-   const int span = SQZ_UsesHour(method) ? lookback * 24 : lookback;
+   const int span = SQZ_UsesHour(method) ? lookback * 32 : lookback;
    return period + span + 2;
 }
 

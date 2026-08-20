@@ -73,9 +73,12 @@ int OnInit()
 
    g_tf = (ENUM_TIMEFRAMES)InpHigherTF;
 
-   if(PeriodSeconds(_Period) >= PeriodSeconds(g_tf))
+   // **チャートと同じ足も認める。** EA 側は膠着を「売買する足と同じ足」で
+   // 測る設定を持っており、そこを目視できないと総当たり4通りのうち1つが
+   // 確かめられないまま残る。短い足だけは意味が無いので弾く。
+   if(PeriodSeconds(_Period) > PeriodSeconds(g_tf))
    {
-      PrintFormat("このチャートの時間足では使えません。%s より短い時間足のチャートに貼ってください",
+      PrintFormat("このチャートの時間足では使えません。%s と同じか、それより短い時間足のチャートに貼ってください",
                   HigherTfLabel(g_tf));
       return INIT_PARAMETERS_INCORRECT;
    }
@@ -84,9 +87,11 @@ int OnInit()
    SetIndexBuffer(1, BufColor,    INDICATOR_COLOR_INDEX);
    SetIndexBuffer(2, BufSqueezed, INDICATOR_DATA);
 
+   const string tfLabel = (g_tf == _Period) ? "このチャートと同じ足" : HigherTfLabel(g_tf);
+
    IndicatorSetString(INDICATOR_SHORTNAME,
                       StringFormat("膠着 %s %s (%d,%d)",
-                                   HigherTfLabel(g_tf), SQZ_MethodLabel(InpMethod),
+                                   tfLabel, SQZ_MethodLabel(InpMethod),
                                    InpPeriod, InpLookback));
    IndicatorSetInteger(INDICATOR_DIGITS, 1);
 
@@ -240,12 +245,16 @@ int OnCalculate(const int rates_total,
 
    const int htfSize = ArraySize(g_meter);
 
-   int cursor;
-   if(!HTF_StartCursor(_Symbol, g_tf, time[limit], htfSize, cursor)) return 0;
+   // チャートと同じ足で測るときは、並べ替えが要らない。その足そのものが
+   // すでに確定した足なので、1本前へ下げると1本ぶん古い値を描いてしまう。
+   const bool sameTf = (g_tf == _Period);
+
+   int cursor = 0;
+   if(!sameTf && !HTF_StartCursor(_Symbol, g_tf, time[limit], htfSize, cursor)) return 0;
 
    for(int i = limit; i >= 0; i--)
    {
-      const int s = HTF_ConfirmedShift(time[i], g_htfTime, cursor);
+      const int s = sameTf ? i : HTF_ConfirmedShift(time[i], g_htfTime, cursor);
 
       if(s >= htfSize || g_meter[s] == EMPTY_VALUE)
       {
@@ -255,7 +264,7 @@ int OnCalculate(const int rates_total,
          continue;
       }
 
-      const bool squeezed = (g_meter[s] <= g_threshold);
+      const bool squeezed = SQZ_IsSqueezed(InpMethod, g_meter[s], g_threshold);
 
       BufMeter[i]    = g_meter[s];
       BufColor[i]    = squeezed ? 1 : 0;
