@@ -305,7 +305,9 @@ struct SMRule2Signal
    bool closeBelow;   // ③終値が青スパンより下
    bool spanBUp;      // ④赤スパンが上向き
    bool spanBDown;    // ④赤スパンが下向き
-   bool buy;          // 使う条件がすべて揃った（買い）
+   bool buyOk;        // ①以外の使う条件がすべて揃った（買いの向き）
+   bool sellOk;       // 同（売りの向き）
+   bool buy;          // ①も含めてすべて揃った（買い）
    bool sell;         // 同（売り）
 };
 
@@ -362,19 +364,24 @@ bool SM_Rule2(const double &high[],
                      out.spanBUp, out.spanBDown))
       return false;
 
-   out.buy = out.flipBlue
-             && (!p.useLagClose   || out.lag.closeAbove)
-             && (!p.useLagHighLow || out.lag.highAbove)
-             && (!p.useLagCloud   || out.lag.cloudAbove)
-             && (!p.useClosePos   || out.closeAbove)
-             && (!p.useSlope      || out.spanBUp);
+   // ①以外の条件をまとめておく。**引き金を差し替えられるようにするため。**
+   // ルール2の引き金は①雲の色の転換だが、統合（R3）では「膠着が始まった
+   // 足で、そのときの雲の色に従って建てる」という別の引き金も試す。その
+   // ときも②③④は同じ形で効かせたいので、①と切り離してある。
+   out.buyOk = (!p.useLagClose   || out.lag.closeAbove)
+            && (!p.useLagHighLow || out.lag.highAbove)
+            && (!p.useLagCloud   || out.lag.cloudAbove)
+            && (!p.useClosePos   || out.closeAbove)
+            && (!p.useSlope      || out.spanBUp);
 
-   out.sell = out.flipRed
-              && (!p.useLagClose   || out.lag.closeBelow)
-              && (!p.useLagHighLow || out.lag.lowBelow)
-              && (!p.useLagCloud   || out.lag.cloudBelow)
-              && (!p.useClosePos   || out.closeBelow)
-              && (!p.useSlope      || out.spanBDown);
+   out.sellOk = (!p.useLagClose   || out.lag.closeBelow)
+             && (!p.useLagHighLow || out.lag.lowBelow)
+             && (!p.useLagCloud   || out.lag.cloudBelow)
+             && (!p.useClosePos   || out.closeBelow)
+             && (!p.useSlope      || out.spanBDown);
+
+   out.buy  = out.flipBlue && out.buyOk;
+   out.sell = out.flipRed  && out.sellOk;
 
    return true;
 }

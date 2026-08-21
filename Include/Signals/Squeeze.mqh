@@ -179,6 +179,21 @@ bool SQZ_KeltnerRatio(const double &close[], const double &high[], const double 
 }
 
 //+------------------------------------------------------------------+
+//| 足の時刻から「時」だけを取り出す                                 |
+//|                                                                  |
+//| **1箇所に置くのは、母集団を絞る側と、値を用意する側で判定がずれ  |
+//| ないようにするため。** ずれると、用意した値が数えられなかったり、|
+//| 数えるべき足の値が空だったりして、順位が黙って変わる。            |
+//|                                                                  |
+//| 時刻は 1970年からの秒数なので、割り算で求まる。TimeToStruct は    |
+//| 構造体をまるごと埋めるため、本数ぶん呼ぶ所では割に合わない。      |
+//+------------------------------------------------------------------+
+int SQZ_HourOf(const datetime t)
+{
+   return (int)((t % 86400) / 3600);
+}
+
+//+------------------------------------------------------------------+
 //| 順位 — 過去N本の中で下から何%の位置にいるか                      |
 //|                                                                  |
 //| 判定する足そのものは母集団に入れない（shift+1 から遡る）。       |
@@ -201,8 +216,7 @@ bool SQZ_Rank(const double &values[], const datetime &time[], const int shift,
    if(ArraySize(time) < size)         return false;
    if(values[shift] == EMPTY_VALUE)   return false;
 
-   MqlDateTime cur;
-   TimeToStruct(time[shift], cur);
+   const int curHour = SQZ_HourOf(time[shift]);
 
    int taken = 0;
    int below = 0;
@@ -211,12 +225,7 @@ bool SQZ_Rank(const double &values[], const datetime &time[], const int shift,
    {
       if(values[j] == EMPTY_VALUE) continue;
 
-      if(sameHour)
-      {
-         MqlDateTime t;
-         TimeToStruct(time[j], t);
-         if(t.hour != cur.hour) continue;
-      }
+      if(sameHour && SQZ_HourOf(time[j]) != curHour) continue;
 
       taken++;
       if(values[j] < values[shift]) below++;
@@ -261,16 +270,44 @@ double SQZ_EffectiveThreshold(const ENUM_SQUEEZE_METHOD method, const double inp
 }
 
 //+------------------------------------------------------------------+
+//| その値が膠着とみなす側かどうか                                   |
+//|                                                                  |
+//| **比べ方をここに1つだけ置くのは、EA とインジケーターで境目がずれ |
+//| るのを防ぐため。** 別々に書くと、チャートで金色に見えている足で   |
+//| EA が建てない（またはその逆）という、目視では原因の分からない     |
+//| 食い違いが起きる。                                                |
+//|                                                                  |
+//| 順位方式は「水準以下」。下から10%なら 10 ちょうども膠着に入れる。 |
+//| ケルトナーは「100 未満」。境目は「帯がケルトナーの内側に完全に    |
+//| 入ったか」で、ちょうど接した状態は内側ではない。                  |
+//+------------------------------------------------------------------+
+bool SQZ_IsSqueezed(const ENUM_SQUEEZE_METHOD method, const double value, const double threshold)
+{
+   if(value == EMPTY_VALUE) return false;
+
+   if(method == SQZ_KELTNER) return (value <  threshold);
+   return                           (value <= threshold);
+}
+
+//+------------------------------------------------------------------+
 //| 必要とする最小の履歴本数                                         |
 //|                                                                  |
 //| 時刻別は同じ時刻が24本に1度しか来ないので、遡る範囲が24倍要る。  |
-//| 週末で並びが飛ぶぶんは余裕を見ず、足りなければ順位を出さない。   |
+//|                                                                  |
+//| **ちょうど24倍では足りない。** 同じ時刻の足は1営業日に1本ずつ現れ |
+//| るので、24倍だけ遡ると母集団はちょうど必要数になり、余りがない。  |
+//| 祝日で1日抜けた瞬間に1本足りなくなり、順位を出せない足が生まれる。|
+//| 順位が出せない足は「膠着していなかった」足と見分けが付かず、その  |
+//| 測り方だけ一度も成立しないまま「効かない」と誤読される。          |
+//|                                                                  |
+//| 遡る範囲を広げても、必要数に達した時点で数え終わるので計算量は    |
+//| 変わらない。増えるのは用意する配列の長さだけ。                    |
 //+------------------------------------------------------------------+
 int SQZ_RequiredBars(const ENUM_SQUEEZE_METHOD method, const int period, const int lookback)
 {
    if(method == SQZ_KELTNER) return period + 2;
 
-   const int span = SQZ_UsesHour(method) ? lookback * 24 : lookback;
+   const int span = SQZ_UsesHour(method) ? lookback * 32 : lookback;
    return period + span + 2;
 }
 
