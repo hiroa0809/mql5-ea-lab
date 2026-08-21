@@ -23,4 +23,4 @@ Desktop.ini
 .DS_Store
 
 # テスターが出力する最適化レポート（生成物・巨大）
-docs/*ReportOptimizer-*.xml
+docs/*ReportOptimizer*.xml
