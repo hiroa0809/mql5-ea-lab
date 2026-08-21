@@ -1,4 +1,4 @@
-# MT5 のストラテジーテスターを設定ファイル経由で自動実行する。
+﻿# MT5 のストラテジーテスターを設定ファイル経由で自動実行する。
 #
 # 2026-08-20 に単発・総当たりの両方で実行を確認した。単発の結果は総当たりの
 # レポートと取引数・損益が一致している。
@@ -91,10 +91,14 @@ if ($Optimize -and $PrintPeriods -ne 'true') {
     throw '総当たりの結果は期間別 CSV でしか残りません。-PrintPeriods true のまま実行してください。'
 }
 
+# 数値として認める形。`[\d.]+` だと `1.2.3` や `.` まで通り、MT5 は
+# その入力を黙って無視して**前回使った値**で走る（走ったのに別条件）。
+$NumRe = '-?(?:\d+(?:\.\d+)?|\.\d+)'
+
 # 「開始:刻み:終了」なら振る、そうでなければ固定。
 # MT5 の書式は 値||開始||刻み||終了||振るか(Y/N)。
 function Format-TesterInput([string]$name, [string]$spec) {
-    if ($spec -match '^\s*(-?[\d.]+)\s*:\s*(-?[\d.]+)\s*:\s*(-?[\d.]+)\s*$') {
+    if ($spec -match "^\s*($NumRe)\s*:\s*($NumRe)\s*:\s*($NumRe)\s*$") {
         return "$name=$($Matches[1])||$($Matches[1])||$($Matches[2])||$($Matches[3])||Y"
     }
 
@@ -103,7 +107,7 @@ function Format-TesterInput([string]$name, [string]$spec) {
     $v = switch -Regex ($spec) { '^\s*true\s*$' { '1' } '^\s*false\s*$' { '0' } default { $spec } }
 
     # 文字列の入力に || 形式は使わない。区切り記号を値の一部と取り違える。
-    if ($v -notmatch '^-?[\d.]+$') { return "$name=$v" }
+    if ($v -notmatch "^$NumRe$") { return "$name=$v" }
 
     return "$name=$v||$v||0||$v||N"
 }
@@ -231,6 +235,23 @@ if ($Report) {
         Write-Error "今回の実行で書かれた結果ファイルがありません（$Report）。テスターのログを確認してください。同名の古いファイルがあっても成功とは扱いません。"
     }
     Write-Host ("出力: {0}  ({1:N0} バイト)" -f $found[0].FullName, $found[0].Length)
+}
+
+# **総当たりでは Report が書かれない**ので、上の確認は一度も走らない。成績は
+# EA が共有フォルダへ出す期間別 CSV でしか残らないため、そちらを成功条件に
+# する。EA の OnTesterInit() は CSV を開けなくても起動を続けるので、共有
+# フォルダの設定ミスや書き込み失敗があっても、確認しなければ成功に見える。
+if ($PrintPeriods -eq 'true') {
+    $common = Join-Path $env:APPDATA 'MetaQuotes\Terminal\Common\Files'
+    $suffix = if ($Optimize) { '_opt' } else { '' }
+    $csv    = Join-Path $common ("{0}_{1}_PERIOD_{2}{3}.csv" -f $PeriodCsv, $Symbol, $Period, $suffix)
+
+    # 古いファイルが残っていても成功と扱わない（Report 側と同じ考え方）。
+    $item = Get-Item -LiteralPath $csv -ErrorAction SilentlyContinue
+    if (-not $item -or $item.LastWriteTime -lt $startedAt) {
+        Write-Error "今回の実行で書かれた期間別 CSV がありません（$csv）。共有フォルダの場所と、テスターのログの [期間別] 行を確認してください。"
+    }
+    Write-Host ("期間別 CSV: {0}  ({1:N0} バイト)" -f $item.FullName, $item.Length)
 }
 
 # テスターのログには、EA が起動時に出す実際の設定と、終了時の条件別成立回数が

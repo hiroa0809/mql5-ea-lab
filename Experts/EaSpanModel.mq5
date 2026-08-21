@@ -670,8 +670,13 @@ void OnTesterPass()
          WriteOptRow(pass, data, "year", IntegerToString(years[i].key),
                      years[i].trades, years[i].net);
 
-      if(ArraySize(all) > 0)
-         WriteOptRow(pass, data, "total", "all", all[0].trades, all[0].net);
+      // **取引が1回も出なかったパスでも合計を1行残す。** そのときは月の
+      // 繰り返しが回らないので、ここで書かないと CSV にそのパスの行が1つも
+      // 現れない。「取引ゼロだった」と「結果が届かなかった」が区別できず、
+      // 合格0通りのときに設定の弾かれを見落とす。
+      const int    tTrades = (ArraySize(all) > 0) ? all[0].trades : 0;
+      const double tNet    = (ArraySize(all) > 0) ? all[0].net    : 0.0;
+      WriteOptRow(pass, data, "total", "all", tTrades, tNet);
    }
 }
 
