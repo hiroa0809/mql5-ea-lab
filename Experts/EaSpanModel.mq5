@@ -212,6 +212,8 @@ input double       InpSqueezeKcMult    = 1.5;           // 膠着: ケルトナ�
 sinput double InpLots          = 0.10;       // ロット
 sinput long   InpMagic         = 20260819;   // マジックナンバー
 sinput bool   InpPrintCounters = true;       // 条件別の成立回数を出力する
+sinput bool   InpPrintPeriods  = true;       // 年別・月別の成績を出力する
+sinput string InpPeriodCsv     = "EaSpanModel_periods";  // 年別・月別を書き出すファイル名の先頭（空なら書かない）
 sinput bool   InpShowIndicator = true;       // チャートにスパンモデルを表示する
 
 CTrade        g_trade;
@@ -281,6 +283,408 @@ string LagModeText(const ENUM_SM_LAG m)
       case SM_LAG_HIGHLOW_CLOUD: return "b+c 高値安値と雲";
    }
    return "不明";
+}
+
+//+------------------------------------------------------------------+
+//| 年別・月別の成績                                                 |
+//|                                                                  |
+//| **最適化レポートには時間の軸が無い。** 1件につき期間全体の合計しか|
+//| 出ないため、「レンジの時期は停滞していたのか」が読めない。そこを  |
+//| 見るには売買プログラム側が期間ごとに割って出すしかない。          |
+//|                                                                  |
+//| 集計の元は MT5 が持っている取引履歴そのもの。自前で損益を数えると |
+//| テスターの集計とずれたときにどちらが正しいか分からなくなる。      |
+//+------------------------------------------------------------------+
+struct PeriodStat
+{
+   int    key;      // 年なら 2022、月なら 202211
+   int    trades;
+   double net;      // ネット損益（口座通貨）
+};
+
+//+------------------------------------------------------------------+
+//| 集計先を探す。無ければ足す                                       |
+//+------------------------------------------------------------------+
+int PeriodSlot(PeriodStat &a[], const int key)
+{
+   for(int i = 0; i < ArraySize(a); i++)
+      if(a[i].key == key) return i;
+
+   const int n = ArraySize(a);
+   ArrayResize(a, n + 1);
+   a[n].key    = key;
+   a[n].trades = 0;
+   a[n].net    = 0.0;
+   return n;
+}
+
+//+------------------------------------------------------------------+
+//| 1 pip が口座通貨でいくらか（1ロットあたり）                      |
+//|                                                                  |
+//| **固定値を書かない。** 「ドル円 0.1 ロットなら 1 pip = 100 円」は |
+//| 今の条件では正しいが、銘柄やロットを変えた瞬間に黙って嘘になる。  |
+//| このプロジェクトは以前、スプレッドを10倍小さく見積もったまま結論  |
+//| を出して破棄している（docs/lessons_learned.md）。                 |
+//|                                                                  |
+//| 小数第3位・第5位まで出る銘柄は、最小変動の10倍が 1 pip。          |
+//+------------------------------------------------------------------+
+double PipValuePerLot()
+{
+   const double tickValue = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
+   const double tickSize  = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+   if(tickSize <= 0.0) return 0.0;
+
+   const int digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
+   const double pip = (digits == 3 || digits == 5) ? _Point * 10.0 : _Point;
+
+   return tickValue * pip / tickSize;
+}
+
+//+------------------------------------------------------------------+
+//| 区分の小さい順に並べ替える                                       |
+//|                                                                  |
+//| **ArraySort は使わない。** 数値の配列専用で、構造体の配列に渡して |
+//| もコンパイルは通るが並ばない。件数はせいぜい数十なので、単純な    |
+//| 入れ替えで足りる。                                                |
+//+------------------------------------------------------------------+
+void PeriodSort(PeriodStat &a[])
+{
+   const int n = ArraySize(a);
+   for(int i = 1; i < n; i++)
+   {
+      const PeriodStat cur = a[i];
+      int j = i - 1;
+      while(j >= 0 && a[j].key > cur.key)
+      {
+         a[j + 1] = a[j];
+         j--;
+      }
+      a[j + 1] = cur;
+   }
+}
+
+//+------------------------------------------------------------------+
+//| 書き出し先の CSV を開く                                          |
+//|                                                                  |
+//| **共有フォルダへ書く。** テスターのログはエージェントごとに分かれ |
+//| ており、どのエージェントが走るかは選べない（実測で16個あり、出力は|
+//| そのうち6個へ散らばっていた）。毎回16箇所を探すことになるうえ、   |
+//| ログは他の出力と混ざり UTF-16LE なので表計算ソフトへ直接貼れない。|
+//| 共有フォルダなら場所が1つに決まる。                               |
+//|   %APPDATA%\MetaQuotes\Terminal\Common\Files\                     |
+//|                                                                  |
+//| **列名も値も英数字だけにしてある。** 文字コードの取り違えで化ける |
+//| 余地を残さないため（MT5 が出す Shift-JIS の CSV を UTF-8 として   |
+//| 読んで化けた経験がある・docs/backtest_design.md）。               |
+//+------------------------------------------------------------------+
+int OpenPeriodCsv()
+{
+   if(InpPeriodCsv == "") return INVALID_HANDLE;
+
+   const string name = StringFormat("%s_%s_%s.csv", InpPeriodCsv, _Symbol,
+                                    EnumToString((ENUM_TIMEFRAMES)_Period));
+
+   const int h = FileOpen(name, FILE_WRITE | FILE_CSV | FILE_ANSI | FILE_COMMON, ',');
+   if(h == INVALID_HANDLE)
+   {
+      PrintFormat("[期間別] %s を書き出せませんでした（エラー %d）", name, GetLastError());
+      return INVALID_HANDLE;
+   }
+
+   FileWrite(h, "scope", "period", "trades", "net", "net_per_trade", "pips_per_trade");
+   PrintFormat("[期間別] 共有フォルダへ書き出します: %s", name);
+   return h;
+}
+
+//+------------------------------------------------------------------+
+//| 集計結果を1つ、ログと CSV の両方へ出す                           |
+//|                                                                  |
+//| ログは日本語、CSV は英数字。読む相手が違う。                      |
+//+------------------------------------------------------------------+
+void ReportPeriodRow(const int csv, const string logTag, const string scope,
+                     const string label, const PeriodStat &s, const double pipValuePerLot)
+{
+   const double perTrade = (s.trades > 0) ? s.net / s.trades : 0.0;
+   const double pips     = (pipValuePerLot > 0.0 && InpLots > 0.0)
+                           ? perTrade / (pipValuePerLot * InpLots) : 0.0;
+
+   PrintFormat("%s %s\t%d\t%.0f\t%.0f\t%.2f", logTag, label, s.trades, s.net, perTrade, pips);
+
+   if(csv != INVALID_HANDLE)
+      FileWrite(csv, scope, label, s.trades,
+                DoubleToString(s.net, 2), DoubleToString(perTrade, 2), DoubleToString(pips, 3));
+}
+
+//+------------------------------------------------------------------+
+//| 年別・月別の成績を出す                                           |
+//|                                                                  |
+//| **総当たりでは出さない。** 1件ごとに数十行が並び、ログが膨らむ    |
+//| だけで読めない。単発テストで見るためのもの。                      |
+//|                                                                  |
+//| 数えるのは建玉を閉じた取引だけ。建てた側には損益が付かないため、  |
+//| 両方数えると取引数が倍になる。                                    |
+//+------------------------------------------------------------------+
+bool CollectPeriods(PeriodStat &years[], PeriodStat &months[], PeriodStat &all[])
+{
+   if(!HistorySelect(0, TimeCurrent())) return false;
+
+   const int total = HistoryDealsTotal();
+
+   for(int i = 0; i < total; i++)
+   {
+      const ulong ticket = HistoryDealGetTicket(i);
+      if(ticket == 0) continue;
+      if(HistoryDealGetString(ticket, DEAL_SYMBOL) != _Symbol)  continue;
+      if(HistoryDealGetInteger(ticket, DEAL_MAGIC) != InpMagic) continue;
+
+      const ENUM_DEAL_ENTRY entry = (ENUM_DEAL_ENTRY)HistoryDealGetInteger(ticket, DEAL_ENTRY);
+      if(entry != DEAL_ENTRY_OUT && entry != DEAL_ENTRY_INOUT) continue;
+
+      const double net = HistoryDealGetDouble(ticket, DEAL_PROFIT)
+                       + HistoryDealGetDouble(ticket, DEAL_SWAP)
+                       + HistoryDealGetDouble(ticket, DEAL_COMMISSION);
+
+      MqlDateTime d;
+      TimeToStruct((datetime)HistoryDealGetInteger(ticket, DEAL_TIME), d);
+
+      const int iy = PeriodSlot(years,  d.year);
+      years[iy].trades++;
+      years[iy].net += net;
+
+      const int im = PeriodSlot(months, d.year * 100 + d.mon);
+      months[im].trades++;
+      months[im].net += net;
+
+      const int ia = PeriodSlot(all, 0);
+      all[ia].trades++;
+      all[ia].net += net;
+   }
+
+   PeriodSort(years);
+   PeriodSort(months);
+   return true;
+}
+
+//+------------------------------------------------------------------+
+//| 単発テストのとき、年別・月別を出す                               |
+//+------------------------------------------------------------------+
+void PrintPeriodResults()
+{
+   if(!InpPrintPeriods) return;
+   if(MQLInfoInteger(MQL_OPTIMIZATION)) return;
+
+   PeriodStat years[], months[], all[];
+   if(!CollectPeriods(years, months, all))
+   {
+      Print("[期間別] 取引履歴を取得できませんでした");
+      return;
+   }
+
+   if(ArraySize(all) == 0)
+   {
+      Print("[期間別] 決済された取引がありません");
+      return;
+   }
+
+   const double pv = PipValuePerLot();
+
+   Print("[期間別] 損益は**ネット**（スプレッド差引後）。合格ラインの平均グロス 3.7 pips と比べるときは、");
+   Print("[期間別] その期間の往復コストを足す（学習期間 0.69 / 検証用 1.09 / 最終OOS 1.22 pips・docs/backtest_design.md）");
+   PrintFormat("[期間別] 1 pip = %.0f（%.2f ロット・1ロットあたり %.0f）", pv * InpLots, InpLots, pv);
+   Print("[期間別] 区分\t取引数\tネット損益\t1取引あたり\t1取引あたり(pips)");
+
+   const int csv = OpenPeriodCsv();
+
+   for(int i = 0; i < ArraySize(years); i++)
+      ReportPeriodRow(csv, "[年別]", "year", IntegerToString(years[i].key), years[i], pv);
+
+   for(int i = 0; i < ArraySize(months); i++)
+      ReportPeriodRow(csv, "[月別]", "month",
+                      StringFormat("%d-%02d", months[i].key / 100, months[i].key % 100),
+                      months[i], pv);
+
+   ReportPeriodRow(csv, "[全期間]", "total", "all", all[0], pv);
+
+   if(csv != INVALID_HANDLE) FileClose(csv);
+}
+
+//+------------------------------------------------------------------+
+//| 総当たりでも全パターンの月別を CSV に出す仕組み                  |
+//|                                                                  |
+//| **総当たりの1回ごとは、別々のエージェント（実測で16個）が走る。** |
+//| それぞれが同じファイルへ書きに行くと書き込みが衝突する。MT5 は    |
+//| この用途に「フレーム」を用意しており、各回の結果を端末へ送り返し  |
+//| て端末側で1つにまとめられる。書き手が1つになるので衝突しない。    |
+//|                                                                  |
+//| 送れるのは数値の並びだけなので、先頭にその回の設定を並べ、続けて  |
+//| 月ごとの（年月・取引数・損益）を三つ組で並べる。並び順を送る側と  |
+//| 受ける側で別々に書くとずれるので、下の定数で1つにしてある。       |
+//|                                                                  |
+//| これが無いと、設定を1つずつ選んで単発テストを回すことになる       |
+//| （2026-08-20 に58通りを1本ずつ回して非効率だった）。              |
+//+------------------------------------------------------------------+
+#define PF_PARAMS 12   // 先頭に置く設定値の数
+#define PF_STRIDE  3   // 1ヶ月あたりの数値の数（年月・取引数・損益）
+
+int g_optCsv = INVALID_HANDLE;   // 端末側で開く、総当たり用の CSV
+
+//+------------------------------------------------------------------+
+//| その回の設定を、フレームの先頭へ詰める                           |
+//+------------------------------------------------------------------+
+void PackParams(double &data[])
+{
+   data[0]  = (double)InpEntryTrigger;
+   data[1]  = (double)InpSqueezeUse;
+   data[2]  = (double)InpSqueezeTF;
+   data[3]  = (double)InpSqueezeLookback;
+   data[4]  = (double)InpEntryDelayBars;
+   data[5]  = (double)InpExitDelayBars;
+   data[6]  = (double)InpLagMode;
+   data[7]  = InpUseClosePos ? 1.0 : 0.0;
+   data[8]  = (double)InpSlopeMode;
+   data[9]  = (double)InpSqueezePeriod;
+   data[10] = InpSqueezeThreshold;
+   data[11] = InpSqueezeKcMult;
+}
+
+//+------------------------------------------------------------------+
+//| 1回ぶんの結果を端末へ送る（エージェント側で動く）                |
+//|                                                                  |
+//| 戻り値は最適化の評価値。本プロジェクトは並べ替えに「残高」を使う |
+//| ので、ここの値は使われない。                                     |
+//+------------------------------------------------------------------+
+double OnTester()
+{
+   if(!InpPrintPeriods) return 0.0;
+   if(!MQLInfoInteger(MQL_OPTIMIZATION)) return 0.0;   // 単発は CSV へ直接書く
+
+   PeriodStat years[], months[], all[];
+   if(!CollectPeriods(years, months, all)) return 0.0;
+
+   const int n = ArraySize(months);
+
+   double data[];
+   ArrayResize(data, PF_PARAMS + 1 + n * PF_STRIDE);
+   PackParams(data);
+   data[PF_PARAMS] = (double)n;
+
+   for(int i = 0; i < n; i++)
+   {
+      const int at = PF_PARAMS + 1 + i * PF_STRIDE;
+      data[at]     = (double)months[i].key;
+      data[at + 1] = (double)months[i].trades;
+      data[at + 2] = months[i].net;
+   }
+
+   FrameAdd("periods", 1, (ArraySize(all) > 0 ? all[0].net : 0.0), data);
+   return 0.0;
+}
+
+//+------------------------------------------------------------------+
+//| 総当たりの開始時（端末側で1回だけ動く）                          |
+//+------------------------------------------------------------------+
+int OnTesterInit()
+{
+   if(!InpPrintPeriods || InpPeriodCsv == "") return INIT_SUCCEEDED;
+
+   const string name = StringFormat("%s_%s_%s_opt.csv", InpPeriodCsv, _Symbol,
+                                    EnumToString((ENUM_TIMEFRAMES)_Period));
+
+   g_optCsv = FileOpen(name, FILE_WRITE | FILE_CSV | FILE_ANSI | FILE_COMMON, ',');
+   if(g_optCsv == INVALID_HANDLE)
+   {
+      PrintFormat("[期間別] %s を書き出せませんでした（エラー %d）", name, GetLastError());
+      return INIT_SUCCEEDED;   // 書けなくても総当たり自体は続ける
+   }
+
+   FileWrite(g_optCsv,
+             "pass", "trigger", "squeeze", "squeeze_tf", "lookback",
+             "entry_delay", "exit_delay", "lag_mode", "use_close_pos", "slope_mode",
+             "sqz_period", "sqz_threshold", "sqz_kcmult",
+             "scope", "period", "trades", "net");
+
+   PrintFormat("[期間別] 総当たりの全パターンを共有フォルダへ書き出します: %s", name);
+   return INIT_SUCCEEDED;
+}
+
+//+------------------------------------------------------------------+
+//| 1行書く                                                          |
+//+------------------------------------------------------------------+
+void WriteOptRow(const ulong pass, const double &p[], const string scope,
+                 const string period, const int trades, const double net)
+{
+   FileWrite(g_optCsv, (string)pass,
+             (int)p[0], (int)p[1], (int)p[2], (int)p[3], (int)p[4], (int)p[5],
+             (int)p[6], (int)p[7], (int)p[8], (int)p[9],
+             DoubleToString(p[10], 2), DoubleToString(p[11], 2),
+             scope, period, trades, DoubleToString(net, 2));
+}
+
+//+------------------------------------------------------------------+
+//| 1回ぶんの結果が届いたとき（端末側で動く）                        |
+//|                                                                  |
+//| 送られてくるのは月別だけ。年別と合計はここで足し上げる。**送る量 |
+//| を増やさないため**で、同じ数字を二度送っても増えるのは通信量だけ。|
+//+------------------------------------------------------------------+
+void OnTesterPass()
+{
+   if(g_optCsv == INVALID_HANDLE) return;
+
+   ulong  pass;
+   string name;
+   long   id;
+   double value;
+   double data[];
+
+   while(FrameNext(pass, name, id, value, data))
+   {
+      if(name != "periods") continue;
+      if(ArraySize(data) < PF_PARAMS + 1) continue;
+
+      const int n = (int)data[PF_PARAMS];
+      if(ArraySize(data) < PF_PARAMS + 1 + n * PF_STRIDE) continue;
+
+      PeriodStat years[], all[];
+
+      for(int i = 0; i < n; i++)
+      {
+         const int at = PF_PARAMS + 1 + i * PF_STRIDE;
+         const int key    = (int)data[at];
+         const int trades = (int)data[at + 1];
+         const double net = data[at + 2];
+
+         WriteOptRow(pass, data, "month",
+                     StringFormat("%d-%02d", key / 100, key % 100), trades, net);
+
+         const int iy = PeriodSlot(years, key / 100);
+         years[iy].trades += trades;
+         years[iy].net    += net;
+
+         const int ia = PeriodSlot(all, 0);
+         all[ia].trades += trades;
+         all[ia].net    += net;
+      }
+
+      PeriodSort(years);
+      for(int i = 0; i < ArraySize(years); i++)
+         WriteOptRow(pass, data, "year", IntegerToString(years[i].key),
+                     years[i].trades, years[i].net);
+
+      if(ArraySize(all) > 0)
+         WriteOptRow(pass, data, "total", "all", all[0].trades, all[0].net);
+   }
+}
+
+//+------------------------------------------------------------------+
+//| 総当たりの終了時（端末側）                                       |
+//+------------------------------------------------------------------+
+void OnTesterDeinit()
+{
+   if(g_optCsv == INVALID_HANDLE) return;
+
+   FileClose(g_optCsv);
+   g_optCsv = INVALID_HANDLE;
+   Print("[期間別] 総当たりの書き出しを終えました");
 }
 
 //+------------------------------------------------------------------+
@@ -777,6 +1181,8 @@ void OnDeinit(const int reason)
       IndicatorRelease(g_sqHandle);
       g_sqHandle = INVALID_HANDLE;
    }
+
+   PrintPeriodResults();
 
    if(!InpPrintCounters) return;
 

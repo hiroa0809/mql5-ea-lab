@@ -23,4 +23,5 @@ Desktop.ini
 .DS_Store
 
 # テスターが出力する最適化レポート（生成物・巨大）
-docs/*ReportOptimizer-*.xml
+# 末尾に口座番号が付く形と付かない形の両方が出るので、ハイフンを含めない
+docs/*ReportOptimizer*.xml

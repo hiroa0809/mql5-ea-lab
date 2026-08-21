@@ -1,9 +1,10 @@
 # MT5 のストラテジーテスターを設定ファイル経由で自動実行する。
 #
-# **未実行**（2026-08-20）。打ち切った売買プログラムを起動する形だったものを
-# 現在の EaSpanModel 向けに書き直したが、まだ一度も走らせていない。P3 の総当た
-# りは MT5 の画面から手で回している（docs/backtest_plan_p3_squeeze.md）。
-# 初めて使うときは、単発テスト1本で結果を突き合わせてから連続実行に使うこと。
+# 2026-08-20 に単発・総当たりの両方で実行を確認した。単発の結果は総当たりの
+# レポートと取引数・損益が一致している。
+#
+# **MT5 はテスト後に自分を再起動することがある。** 連続して回すときは、毎回
+# 呼ぶ前に閉じること（本スクリプトは起動中だと待って諦める）。
 #
 # MT5 は /config:<ini> を渡すと、テストまたは総当たりを回して自分で終了する。
 # これで人手を介さずに条件を変えた連続実行ができる。
@@ -24,7 +25,10 @@
 #   -LagMode 5            固定
 #   -SqueezeUse 1:1:5     1 から 5 まで 1 刻みで振る（開始:刻み:終了）
 #
-# 総当たりの結果は -Report で指定した XML に出る。単発テストでは使わない。
+# 成績は EA が共有フォルダへ書く期間別 CSV で取る。
+#   単発   … <PeriodCsv>_<銘柄>_<時間足>.csv
+#   総当たり… <PeriodCsv>_<銘柄>_<時間足>_opt.csv（全パターンぶん・pass 列つき）
+# 置き場所は %APPDATA%\MetaQuotes\Terminal\Common\Files\。
 
 [CmdletBinding()]
 param(
@@ -40,7 +44,12 @@ param(
     [int]$Model = 2,
 
     [switch]$Optimize,                                   # 総当たりにする
-    [string]$Report = '',                                # 総当たりの結果 XML（絶対パス）
+
+    # **総当たりでは MT5 が Report を書かない**（2026-08-20 実測。指定しても
+    # ファイルは作られず、テスターのログにも記録が残らない）。総当たりの
+    # 成績は EA が出す期間別 CSV で取る。順位・PF・最大DD が要るときだけ、
+    # MT5 の画面から手で書き出すこと。
+    [string]$Report = '',
 
     # エントリーのきっかけ 0=雲の色が変わったとき 1=膠着が始まったとき 2=どちらでも
     [string]$EntryTrigger = '0',
@@ -66,6 +75,11 @@ param(
 
     [string]$Lots = '0.10',
 
+    # 年別・月別の成績。CSV は共有フォルダ（Terminal\Common\Files）へ出る。
+    # 識別名を混ぜて、連続実行で上書きし合わないようにする。
+    [string]$PrintPeriods = 'true',
+    [string]$PeriodCsv    = "p3_$Tag",
+
     [int]$TimeoutMin  = 480,
     [int]$WaitFreeSec = 90,                              # 同じ端末が空くまで待つ秒数
     [string]$Terminal = 'C:\Program Files\XM Trading MT5\terminal64.exe'
@@ -73,8 +87,8 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-if ($Optimize -and -not $Report) {
-    throw '総当たりでは -Report に結果 XML の絶対パスを指定してください。指定しないと結果が残りません。'
+if ($Optimize -and $PrintPeriods -ne 'true') {
+    throw '総当たりの結果は期間別 CSV でしか残りません。-PrintPeriods true のまま実行してください。'
 }
 
 # 「開始:刻み:終了」なら振る、そうでなければ固定。
@@ -83,7 +97,15 @@ function Format-TesterInput([string]$name, [string]$spec) {
     if ($spec -match '^\s*(-?[\d.]+)\s*:\s*(-?[\d.]+)\s*:\s*(-?[\d.]+)\s*$') {
         return "$name=$($Matches[1])||$($Matches[1])||$($Matches[2])||$($Matches[3])||Y"
     }
-    return "$name=$spec||$spec||0||$spec||N"
+
+    # true/false は 0/1 へ直す。|| 形式は数値・列挙のための書式なので、
+    # 文字のまま入れると解釈が処理系任せになる。
+    $v = switch -Regex ($spec) { '^\s*true\s*$' { '1' } '^\s*false\s*$' { '0' } default { $spec } }
+
+    # 文字列の入力に || 形式は使わない。区切り記号を値の一部と取り違える。
+    if ($v -notmatch '^-?[\d.]+$') { return "$name=$v" }
+
+    return "$name=$v||$v||0||$v||N"
 }
 
 # 同じデータフォルダを2つの端末が同時に使えないため、起動中だと設定が無視され、
@@ -131,6 +153,10 @@ $inputLines = @(
     # 出て切り分けに使える。総当たりでは1件ごとにログが膨らむだけなので切る。
     Format-TesterInput 'InpPrintCounters'   ($(if ($Optimize) { 'false' } else { 'true' }))
     Format-TesterInput 'InpShowIndicator'   'false'
+    # 総当たりでは EA 側が自動で抑止するが、設定は必ず書き出す（書かない
+    # 入力は前回値を引き継ぐため）
+    Format-TesterInput 'InpPrintPeriods'    $PrintPeriods
+    Format-TesterInput 'InpPeriodCsv'       $PeriodCsv
 )
 
 $reportLines = if ($Report) { @("Report=$Report", 'ReplaceReport=1') } else { @() }
