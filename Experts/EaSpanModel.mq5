@@ -61,6 +61,7 @@
 #include <Trade\Trade.mqh>
 #include <Signals\SpanModel.mqh>
 #include <Signals\Squeeze.mqh>
+#include <Signals\MacroDays.mqh>
 
 //+------------------------------------------------------------------+
 //| ②遅行スパンを何と比べるか                                        |
@@ -163,6 +164,20 @@ enum ENUM_SQZ_TF
 };
 
 //+------------------------------------------------------------------+
+//| マクロ指標が反応した日（R2）での絞り込み                         |
+//|                                                                  |
+//| 元の一覧は「行き過ぎからの回帰を狙う売買で建てるのを止める日」。  |
+//| こちらは向きを逆に取り、**トレンドが出ている日**とみなして使う。  |
+//| 一覧と R2 の中身は Include\Signals\MacroDays.mqh を読むこと。      |
+//+------------------------------------------------------------------+
+enum ENUM_MACRO_USE
+{
+   MACRO_USE_OFF      = 0,   // 使わない
+   MACRO_USE_ON_DAYS  = 1,   // 反応した日だけ建てる
+   MACRO_USE_OFF_DAYS = 2    // 反応しなかった日だけ建てる（対照）
+};
+
+//+------------------------------------------------------------------+
 //| 選択肢を実際の時間足へ読み替える                                 |
 //+------------------------------------------------------------------+
 ENUM_TIMEFRAMES SqueezeTimeframe(const ENUM_SQZ_TF m)
@@ -205,6 +220,12 @@ input int          InpSqueezePeriod    = 21;            // 膠着: 期間（セ�
 input int          InpSqueezeLookback  = 120;           // 膠着: 順位を見る本数
 input double       InpSqueezeThreshold = 10.0;          // 膠着とみなす水準（順位方式のみ）
 input double       InpSqueezeKcMult    = 1.5;           // 膠着: ケルトナーの倍率
+
+//--- マクロ指標が反応した日での絞り込み（エントリーだけに掛かる）。
+//--- 「対象日以外」は対照実験用。成績が変わったときに「マクロが効いた」
+//--- のか「取引が減っただけ」なのかを切り分けるために要る。片側だけ
+//--- 測ると、どちらの説明も付いてしまう。
+input ENUM_MACRO_USE InpMacroUse = MACRO_USE_OFF;   // マクロ反応日での絞り込み
 
 //--- 売買の中身に関わらない項目。**sinput は最適化の対象にならない。**
 //--- 総当たりに紛れ込ませても結果が変わらないのに実行回数だけ倍になる
@@ -251,6 +272,10 @@ long g_cntEntry = 0, g_cntExit = 0, g_cntOrderFailed = 0, g_cntBlocked = 0;
 //--- 状態は、条件が厳しくて建たない状態と結果が同じになるため、合算
 //--- すると取引ゼロの原因を切り分けられない。
 long g_cntSqzPass = 0, g_cntSqzReject = 0, g_cntSqzNoData = 0;
+
+//--- マクロ反応日の絞り込みで通した回数・落とした回数。取引が極端に
+//--- 減ったときに、絞り込みが原因かを切り分ける。
+long g_cntMacroPass = 0, g_cntMacroReject = 0;
 
 //--- 膠着が始まった足の数。「膠着が始まったとき」をきっかけに選んだのに
 //--- 取引が出ないとき、引き金が一度も引かれていないのか、引かれたが雲の
@@ -523,7 +548,7 @@ void PrintPeriodResults()
 //| これが無いと、設定を1つずつ選んで単発テストを回すことになる       |
 //| （2026-08-20 に58通りを1本ずつ回して非効率だった）。              |
 //+------------------------------------------------------------------+
-#define PF_PARAMS 12   // 先頭に置く設定値の数
+#define PF_PARAMS 13   // 先頭に置く設定値の数
 #define PF_STRIDE  3   // 1ヶ月あたりの数値の数（年月・取引数・損益）
 
 int g_optCsv = INVALID_HANDLE;   // 端末側で開く、総当たり用の CSV
@@ -545,6 +570,7 @@ void PackParams(double &data[])
    data[9]  = (double)InpSqueezePeriod;
    data[10] = InpSqueezeThreshold;
    data[11] = InpSqueezeKcMult;
+   data[12] = (double)InpMacroUse;
 }
 
 //+------------------------------------------------------------------+
@@ -600,7 +626,7 @@ int OnTesterInit()
    FileWrite(g_optCsv,
              "pass", "trigger", "squeeze", "squeeze_tf", "lookback",
              "entry_delay", "exit_delay", "lag_mode", "use_close_pos", "slope_mode",
-             "sqz_period", "sqz_threshold", "sqz_kcmult",
+             "sqz_period", "sqz_threshold", "sqz_kcmult", "macro_use",
              "scope", "period", "trades", "net");
 
    PrintFormat("[期間別] 総当たりの全パターンを共有フォルダへ書き出します: %s", name);
@@ -616,7 +642,7 @@ void WriteOptRow(const ulong pass, const double &p[], const string scope,
    FileWrite(g_optCsv, (string)pass,
              (int)p[0], (int)p[1], (int)p[2], (int)p[3], (int)p[4], (int)p[5],
              (int)p[6], (int)p[7], (int)p[8], (int)p[9],
-             DoubleToString(p[10], 2), DoubleToString(p[11], 2),
+             DoubleToString(p[10], 2), DoubleToString(p[11], 2), (int)p[12],
              scope, period, trades, DoubleToString(net, 2));
 }
 
@@ -1201,6 +1227,15 @@ void OnDeinit(const int reason)
 
    PrintFormat("          きっかけ: %s", EntryTriggerText(InpEntryTrigger));
 
+   // **膠着より先に出す。** 下の「膠着: 使わない」は return で抜けるため、
+   // 後ろに置くと膠着を切ったときだけ出なくなる。
+   if(InpMacroUse == MACRO_USE_OFF)
+      Print("          マクロ反応日: 使わない");
+   else
+      PrintFormat("          マクロ反応日(%s): 通した %I64d / 落とした %I64d   一覧の範囲 %d〜%d",
+                  (InpMacroUse == MACRO_USE_ON_DAYS ? "反応した日だけ" : "反応しなかった日だけ・対照"),
+                  g_cntMacroPass, g_cntMacroReject, MACRO_R2_FIRST, MACRO_R2_LAST);
+
    if(InpSqueezeUse == SQZ_USE_OFF)
    {
       Print("          膠着: 使わない");
@@ -1408,6 +1443,25 @@ void OnTick()
          return;
       }
       g_cntSqzPass++;
+   }
+
+   // ── マクロ反応日 ─────────────────────────────────────
+   // **膠着と同じくエントリーだけに掛ける。** 対象外の日に入ったら決済
+   // する、という作りにはしない。手仕舞いの条件が2系統になり、成績の
+   // 変化がエントリーの絞り込みによるものか決済によるものか分からなくなる。
+   //
+   // 判定に使うのは**建てる時点の日付**（サーバー時刻）。一覧は UTC の
+   // カレンダー日なので境目が数時間ずれる（MacroDays.mqh の注意書き）。
+   if(InpMacroUse != MACRO_USE_OFF)
+   {
+      const bool on   = MacroR2IsOn(MacroYmd(TimeCurrent()));
+      const bool want = (InpMacroUse == MACRO_USE_ON_DAYS) ? on : !on;
+      if(!want)
+      {
+         g_cntMacroReject++;
+         return;
+      }
+      g_cntMacroPass++;
    }
 
    // 建玉は常に1つまで。決済が成立していればここでは見つからないので、
