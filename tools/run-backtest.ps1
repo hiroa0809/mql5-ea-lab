@@ -73,6 +73,9 @@ param(
     [string]$SqueezeThreshold = '10.0',
     [string]$SqueezeKcMult    = '1.5',
 
+    # マクロ反応日での絞り込み 0=使わない 1=反応した日だけ 2=反応しなかった日だけ（対照）
+    [string]$MacroUse = '0',
+
     [string]$Lots = '0.10',
 
     # 年別・月別の成績。CSV は共有フォルダ（Terminal\Common\Files）へ出る。
@@ -152,6 +155,7 @@ $inputLines = @(
     Format-TesterInput 'InpSqueezeLookback' $SqueezeLookback
     Format-TesterInput 'InpSqueezeThreshold' $SqueezeThreshold
     Format-TesterInput 'InpSqueezeKcMult'   $SqueezeKcMult
+    Format-TesterInput 'InpMacroUse'        $MacroUse
     Format-TesterInput 'InpLots'            $Lots
     # 診断出力は結果を変えないが、単発テストではログに条件別の成立回数が
     # 出て切り分けに使える。総当たりでは1件ごとにログが膨らむだけなので切る。
