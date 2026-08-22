@@ -69,28 +69,27 @@ CodeRabbit 行の読み方:
 
 ### PENDING 時の自動待機
 
-PENDING の間は**手動で何度も確認させない**。代わりに**バックグラウンドのループで数分間隔ポーリング**して完了を待ち、完了したら自動で再開して Step 1 へ進む（この環境では foreground の `sleep` がブロックされるため、必ず `run_in_background: true` で起動する。detached で走り、終了時に再呼び出しされる）:
+PENDING の間は**手動で何度も確認させない**。`tools/wait-coderabbit.ps1` を**必ず `run_in_background: true` で**起動する（この環境は前景の `sleep` が止まる）。detached で走り、終了時に再呼び出しされるので、完了通知で Step 1 へ進む。
 
-```bash
-# description が "Review completed" になるまで 150秒間隔でポーリング。
-# state だけで抜けないこと（レート制限は state=SUCCESS のまま来る）。
-# 必ず run_in_background: true で起動すること（完了通知で再開→Step 1 へ）。
-while true; do
-  d=$(rtk gh pr checks <PR#> --repo hiroa0809/mql5-ea-lab --json name,state,description --jq '.[] | select(.name=="CodeRabbit") | .state + " / " + .description')
-  echo "CodeRabbit: ${d:-（未生成）}"
-  case "$d" in *"Review completed"*|FAILURE*) exit 0;; esac
-  case "$d" in *"rate limited"*) echo "レート制限。待って @coderabbitai review で手動起動する"; exit 2;; esac
-  case "$d" in *"skipped"*) echo "自動レビューが走っていない。Step 0.4 で手動起動する"; exit 3;; esac
-  sleep 150
-done
+```
+tools/wait-coderabbit.ps1 -Pr <PR#>
 ```
 
-- ポーリング間隔は 120〜180 秒（CodeRabbit のレビューは通常数分で終わる）。
-- push 直後でチェックがまだ生成されていない（CodeRabbit 行が空）場合も、ループ内で `d` が空のまま回り続けるので、行が現れた時点で判定される。
-- **終了コード 2 はレート制限**。この場合レビューは走っていないので Step 1 へ進まない。制限コメントの `Next review available in: N minutes` ぶん待ってから `@coderabbitai review` を投稿し、再度このループを回す。
-- **終了コード 3 は自動レビュー未起動**（スキップ）。Step 0.4 の手動起動を先に行う。
-- 完了通知で再開したら Step 1（指摘取得）へ。`Review completed` で新規指摘が無ければ「合格・新規指摘なし」で確定。
-- 万一ハングしてもユーザーはいつでも割り込める。
+**打ち直さずこのスクリプトを呼ぶ。** 以前はここにループを直接書いていたが、毎回書き写す際に `rtk` の付け忘れや進捗表示の脱落が起きた（2026-08-21）。
+
+終了コードで分岐する:
+
+| 終了コード | 意味 | 次の行動 |
+|---|---|---|
+| 0 | レビュー完了（または FAILURE） | Step 1（指摘の取得）へ |
+| **2** | **レート制限。レビューは走っていない** | Step 1 へ**進まない**。制限コメントの `Next review available in: N minutes` ぶん待ち、`@coderabbitai review` を再投稿してから再度このスクリプトを回す |
+| **3** | **自動レビュー未起動**（スター10個未満） | Step 0.4 の手動起動を先に行う |
+| 4 | 時間切れ（既定30分） | PR の画面を確認する |
+
+- `state` だけで判定しないこと。レート制限は `state=SUCCESS` のまま `description` が `Review rate limited` になる。スクリプトは `description` で判定している
+- push 直後でチェックがまだ生成されていない場合も、行が現れるまで回り続ける
+- `Review completed` で新規指摘が無ければ「合格・新規指摘なし」で確定してよい
+- 万一ハングしてもユーザーはいつでも割り込める
 
 ## Step 1: レビュー取得（出力は context-mode で処理）
 
