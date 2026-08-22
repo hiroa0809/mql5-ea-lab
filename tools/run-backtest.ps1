@@ -73,12 +73,19 @@ param(
     [string]$SqueezeThreshold = '10.0',
     [string]$SqueezeKcMult    = '1.5',
 
+    # マクロ反応日での絞り込み 0=使わない 1=反応した日だけ 2=反応しなかった日だけ（対照）
+    [string]$MacroUse = '0',
+
     [string]$Lots = '0.10',
 
     # 年別・月別の成績。CSV は共有フォルダ（Terminal\Common\Files）へ出る。
     # 識別名を混ぜて、連続実行で上書きし合わないようにする。
     [string]$PrintPeriods = 'true',
     [string]$PeriodCsv    = "p3_$Tag",
+
+    # テストが終わっても MT5 を閉じない。画面で結果を見たいときに使う。
+    # 閉じないので次の実行は手で閉じてから。待ち受けもしない（起動して戻る）。
+    [switch]$KeepOpen,
 
     [int]$TimeoutMin  = 480,
     [int]$WaitFreeSec = 90,                              # 同じ端末が空くまで待つ秒数
@@ -152,6 +159,7 @@ $inputLines = @(
     Format-TesterInput 'InpSqueezeLookback' $SqueezeLookback
     Format-TesterInput 'InpSqueezeThreshold' $SqueezeThreshold
     Format-TesterInput 'InpSqueezeKcMult'   $SqueezeKcMult
+    Format-TesterInput 'InpMacroUse'        $MacroUse
     Format-TesterInput 'InpLots'            $Lots
     # 診断出力は結果を変えないが、単発テストではログに条件別の成立回数が
     # 出て切り分けに使える。総当たりでは1件ごとにログが膨らむだけなので切る。
@@ -180,7 +188,7 @@ $body = @(
     'Currency=JPY'
     'Leverage=1:500'
     'ExecutionMode=0'
-    'ShutdownTerminal=1'
+    "ShutdownTerminal=$(if ($KeepOpen) { 0 } else { 1 })"
     'Visual=0'
     $reportLines
     ''
@@ -194,6 +202,15 @@ Write-Host "設定: $ini"
 Write-Host "実行: $Symbol $Period  $From 〜 $To  ティック=$Model  $(if ($Optimize) { '総当たり' } else { '単発' })  識別名=$Tag"
 $inputLines | Where-Object { $_ -match '\|\|Y$' } | ForEach-Object { Write-Host "  振る: $_" }
 
+# **固定した項目も全部出す。** 指定しなかった項目は既定値で埋まるが、その
+# 既定値が「使う」側のこともある。表示しないと、比較相手と違う条件で走って
+# いても気づけない（2026-08-21 に発生。②③④を切らずにマクロ検証を回し、
+# 前回の総当たりと比べられない結果を作った）。
+$inputLines | Where-Object { $_ -notmatch '\|\|Y$' } | ForEach-Object {
+    $n, $v = $_ -split '=', 2
+    Write-Host ("  固定: {0,-22} {1}" -f $n, ($v -split '\|\|')[0])
+}
+
 # 起動時刻を控える。**今回の実行で書かれたレポートだけを成功と認めるため。**
 # 同じ名前の古いレポートが残っていると、MT5 が書けずに終わっても前回の結果を
 # 拾って成功に見える。秒未満を落とすのは、ファイル時刻の分解能が粗い環境で
@@ -205,6 +222,17 @@ $sw = [System.Diagnostics.Stopwatch]::StartNew()
 # 設定ファイルのパスは引用する。%TEMP% にユーザー名が入るため、名前に空白が
 # あると引数が途中で切れる（/config: と本体の間に空白は入れない）。
 $proc = Start-Process -FilePath $Terminal -ArgumentList "/config:`"$ini`"" -PassThru
+
+if ($KeepOpen) {
+    # 閉じない指定のときは終了を待てない（終了しないため）。出力の確認も
+    # できないので行わない。結果は MT5 の画面で見る。
+    $sw.Stop()
+    Write-Host "MT5 (PID $($proc.Id)) を起動しました。テスト終了後も開いたままにします。"
+    Write-Host "結果は MT5 の「ストラテジーテスター」で確認してください。"
+    Write-Host "次に本スクリプトを実行するときは、先に MT5 を閉じてください。"
+    return
+}
+
 $exited = $proc.WaitForExit($TimeoutMin * 60 * 1000)
 $sw.Stop()
 
