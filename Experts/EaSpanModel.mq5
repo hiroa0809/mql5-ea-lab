@@ -275,7 +275,7 @@ long g_cntSqzPass = 0, g_cntSqzReject = 0, g_cntSqzNoData = 0;
 
 //--- マクロ反応日の絞り込みで通した回数・落とした回数。取引が極端に
 //--- 減ったときに、絞り込みが原因かを切り分ける。
-long g_cntMacroPass = 0, g_cntMacroReject = 0;
+long g_cntMacroPass = 0, g_cntMacroReject = 0, g_cntMacroNoData = 0;
 
 //--- 膠着が始まった足の数。「膠着が始まったとき」をきっかけに選んだのに
 //--- 取引が出ないとき、引き金が一度も引かれていないのか、引かれたが雲の
@@ -1232,9 +1232,18 @@ void OnDeinit(const int reason)
    if(InpMacroUse == MACRO_USE_OFF)
       Print("          マクロ反応日: 使わない");
    else
-      PrintFormat("          マクロ反応日(%s): 通した %I64d / 落とした %I64d   一覧の範囲 %d〜%d",
+   {
+      PrintFormat("          マクロ反応日(%s): 通した %I64d / 落とした %I64d / 範囲外で見送った %I64d",
                   (InpMacroUse == MACRO_USE_ON_DAYS ? "反応した日だけ" : "反応しなかった日だけ・対照"),
-                  g_cntMacroPass, g_cntMacroReject, MACRO_R2_FIRST, MACRO_R2_LAST);
+                  g_cntMacroPass, g_cntMacroReject, g_cntMacroNoData);
+      PrintFormat("                        元データが覆う範囲 %d〜%d（反応日は %d〜%d）",
+                  MACRO_R2_COVER_FROM, MACRO_R2_COVER_TO, MACRO_R2_FIRST, MACRO_R2_LAST);
+
+      // 範囲外が混ざった状態は、条件が厳しくて建たないのと結果が同じ
+      // 「取引が少ない」になる。黙って通さず名指しで出す。
+      if(g_cntMacroNoData > 0)
+         Print("                        **範囲外の日があります。** 日付の一覧を更新してください");
+   }
 
    if(InpSqueezeUse == SQZ_USE_OFF)
    {
@@ -1454,7 +1463,22 @@ void OnTick()
    // カレンダー日なので境目が数時間ずれる（MacroDays.mqh の注意書き）。
    if(InpMacroUse != MACRO_USE_OFF)
    {
-      const bool on   = MacroR2IsOn(MacroYmd(TimeCurrent()));
+      const int ymd = MacroYmd(TimeCurrent());
+
+      // **元データが覆っていない日は建てない。** ここで通すと、
+      // 「反応しなかった日だけ」が全通しになり、絞り込みが無効のまま
+      // 黙って動く。取引ゼロと区別できるよう別に数える。
+      if(!MacroR2Covered(ymd))
+      {
+         if(g_cntMacroNoData == 0)
+            PrintFormat("マクロ反応日: %d は一覧の範囲外です（%d〜%d）。"
+                        "範囲外のあいだは建てません。日付の一覧を更新してください。",
+                        ymd, MACRO_R2_COVER_FROM, MACRO_R2_COVER_TO);
+         g_cntMacroNoData++;
+         return;
+      }
+
+      const bool on   = MacroR2IsOn(ymd);
       const bool want = (InpMacroUse == MACRO_USE_ON_DAYS) ? on : !on;
       if(!want)
       {
